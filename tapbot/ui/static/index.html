@@ -1,0 +1,332 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>TapBot</title>
+  <style>
+    :root { color-scheme: dark; font-family: system-ui, sans-serif; }
+    * { box-sizing: border-box; }
+    body { margin: 0; background: #101418; color: #edf2f7; }
+    header { padding: 16px 24px; border-bottom: 1px solid #34404b; }
+    h1, h2 { margin: 0; }
+    h1 { font-size: 22px; }
+    h2 { margin-bottom: 14px; font-size: 16px; }
+    main { display: grid; grid-template-columns: minmax(0, 3fr) minmax(240px, 1fr); }
+    section { padding: 20px; border-bottom: 1px solid #34404b; }
+    .preview { min-height: 400px; display: grid; place-items: center; background: #080a0c; }
+    .preview-grid { width: 100%; display: grid; grid-template-columns: 1fr 1fr; gap: 14px; align-items: center; }
+    figure { margin: 0; min-width: 0; text-align: center; }
+    figcaption { padding: 8px; color: #aab5bf; font-size: 13px; }
+    .camera-stage { position: relative; display: inline-block; max-width: 100%; line-height: 0; }
+    .preview img { display: block; max-width: 100%; max-height: 65vh; object-fit: contain; cursor: crosshair; }
+    #vision-debug { margin: auto; cursor: default; }
+    .corner-marker { position: absolute; width: 18px; height: 18px; border: 2px solid white; border-radius: 50%; background: #f04c55; color: white; transform: translate(-50%, -50%); pointer-events: none; box-shadow: 0 0 0 2px #101418; font: bold 10px/14px system-ui; text-align: center; }
+    .controls { border-left: 1px solid #34404b; }
+    label { display: grid; gap: 6px; margin-bottom: 12px; color: #aab5bf; }
+    input, button { border: 1px solid #475663; border-radius: 6px; padding: 10px; font: inherit; }
+    input { width: 100%; background: #171d22; color: white; }
+    .buttons { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+    button { cursor: pointer; background: #2463a7; color: white; font-weight: 650; }
+    button:hover { filter: brightness(1.15); }
+    button:disabled { cursor: wait; opacity: .55; }
+    button.stop { background: #c42d37; }
+    .log { grid-column: 1 / -1; }
+    .calibration { grid-column: 1 / -1; }
+    .calibration-grid { display: grid; grid-template-columns: repeat(4, minmax(130px, 1fr)); gap: 12px; }
+    .calibration-actions { display: flex; gap: 10px; flex-wrap: wrap; margin: 12px 0; }
+    .calibration-actions button { width: auto; }
+    .corner-input { padding: 10px; border: 1px solid #34404b; border-radius: 6px; }
+    .corner-input strong { display: block; margin-bottom: 8px; }
+    .corner-input label { margin-bottom: 8px; }
+    #calibration-result { color: #b9f6ca; min-height: 1.5em; }
+    #log-output { height: 220px; overflow: auto; padding: 12px; margin: 0; background: #080a0c; color: #b9f6ca; font: 13px/1.55 ui-monospace, monospace; white-space: pre-wrap; }
+    #status { margin-top: 14px; color: #aab5bf; font-size: 13px; }
+    .error { color: #ff8a8a; }
+    @media (max-width: 720px) {
+      main { grid-template-columns: 1fr; }
+      .controls { border-left: 0; }
+      .log { grid-column: 1; }
+      .calibration { grid-column: 1; }
+      .calibration-grid { grid-template-columns: 1fr 1fr; }
+      .preview { min-height: 260px; }
+      .preview-grid { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+  <header><h1>TapBot</h1></header>
+  <main>
+    <section class="preview" aria-label="Camera Preview">
+      <div class="preview-grid">
+        <figure>
+          <div class="camera-stage" id="camera-stage">
+            <img id="camera" alt="Camera preview">
+          </div>
+          <figcaption>Camera Preview · click to calibrate/test</figcaption>
+        </figure>
+        <figure>
+          <img id="vision-debug" alt="Rectified screen detection overlay">
+          <figcaption>Rectified Vision Debug Overlay</figcaption>
+        </figure>
+      </div>
+    </section>
+    <section class="controls">
+      <h2>Robot Control</h2>
+      <label>X <input id="x" type="number" min="0" max="1000" step="any" value="100"></label>
+      <label>Y <input id="y" type="number" min="0" max="1000" step="any" value="200"></label>
+      <div class="buttons">
+        <button data-command="move">Move</button>
+        <button data-command="tap">Tap</button>
+        <button data-command="home">Home</button>
+        <button class="stop" data-command="stop">STOP</button>
+      </div>
+      <div id="status">Connecting…</div>
+    </section>
+    <section class="calibration">
+      <h2>Screen ↔ Robot Calibration</h2>
+      <p>Select camera corners in this order: top-left, top-right, bottom-right, bottom-left. After saving, click the camera image to test a point.</p>
+      <div class="calibration-grid">
+        <label>Profile <input id="profile-name" value="default"></label>
+        <label>Phone logical width <input id="phone-width" type="number" min="1" value="1000"></label>
+        <label>Phone logical height <input id="phone-height" type="number" min="1" value="2000"></label>
+        <div id="corner-status">0 / 4 camera corners selected</div>
+      </div>
+      <div class="calibration-actions">
+        <button id="select-corners">Select 4 corners</button>
+        <button id="clear-corners">Clear corners</button>
+        <button id="save-calibration">Save calibration</button>
+      </div>
+      <div class="calibration-grid" id="robot-points">
+        <div class="corner-input"><strong>Top-left robot</strong><label>X <input id="robot-0-x" type="number" step="any" value="0"></label><label>Y <input id="robot-0-y" type="number" step="any" value="0"></label></div>
+        <div class="corner-input"><strong>Top-right robot</strong><label>X <input id="robot-1-x" type="number" step="any" value="300"></label><label>Y <input id="robot-1-y" type="number" step="any" value="0"></label></div>
+        <div class="corner-input"><strong>Bottom-right robot</strong><label>X <input id="robot-2-x" type="number" step="any" value="300"></label><label>Y <input id="robot-2-y" type="number" step="any" value="600"></label></div>
+        <div class="corner-input"><strong>Bottom-left robot</strong><label>X <input id="robot-3-x" type="number" step="any" value="0"></label><label>Y <input id="robot-3-y" type="number" step="any" value="600"></label></div>
+      </div>
+      <div id="calibration-result" aria-live="polite"></div>
+    </section>
+    <section class="log">
+      <h2>Log</h2>
+      <pre id="log-output" aria-live="polite"></pre>
+    </section>
+  </main>
+  <script>
+    const camera = document.querySelector('#camera');
+    const visionDebug = document.querySelector('#vision-debug');
+    const cameraStage = document.querySelector('#camera-stage');
+    const statusBox = document.querySelector('#status');
+    const logOutput = document.querySelector('#log-output');
+    const cornerStatus = document.querySelector('#corner-status');
+    const calibrationResult = document.querySelector('#calibration-result');
+    let lastLogId = 0;
+    let selectingCorners = false;
+    let cameraCorners = [];
+
+    async function command(name) {
+      const coordinateCommand = name === 'move' || name === 'tap';
+      const options = { method: 'POST', headers: {} };
+      if (coordinateCommand) {
+        options.headers['Content-Type'] = 'application/json';
+        options.body = JSON.stringify({
+          x: Number(document.querySelector('#x').value),
+          y: Number(document.querySelector('#y').value)
+        });
+      }
+      try {
+        const response = await fetch(`/api/robot/${name}`, options);
+        const result = await response.json();
+        if (!response.ok) throw new Error(result.detail || `HTTP ${response.status}`);
+        statusBox.textContent = `${result.action} completed`;
+        statusBox.className = '';
+      } catch (error) {
+        statusBox.textContent = `Error: ${error.message}`;
+        statusBox.className = 'error';
+      }
+    }
+
+    document.querySelectorAll('button[data-command]').forEach(button => {
+      button.addEventListener('click', async () => {
+        button.disabled = true;
+        await command(button.dataset.command);
+        button.disabled = false;
+        await refreshLogs();
+      });
+    });
+
+    function refreshCamera() {
+      camera.src = `/api/camera/frame?t=${Date.now()}`;
+    }
+
+    function refreshVisionDebug() {
+      visionDebug.src = `/api/vision/debug?t=${Date.now()}`;
+    }
+
+    function renderCornerMarkers() {
+      cameraStage.querySelectorAll('.corner-marker').forEach(marker => marker.remove());
+      if (!camera.naturalWidth || !camera.naturalHeight) return;
+      cameraCorners.forEach((point, index) => {
+        const marker = document.createElement('span');
+        marker.className = 'corner-marker';
+        marker.textContent = String(index + 1);
+        marker.style.left = `${point.x / camera.naturalWidth * 100}%`;
+        marker.style.top = `${point.y / camera.naturalHeight * 100}%`;
+        cameraStage.appendChild(marker);
+      });
+      cornerStatus.textContent = `${cameraCorners.length} / 4 camera corners selected`;
+    }
+
+    function clickedCameraPoint(event) {
+      const bounds = camera.getBoundingClientRect();
+      return {
+        x: (event.clientX - bounds.left) * camera.naturalWidth / bounds.width,
+        y: (event.clientY - bounds.top) * camera.naturalHeight / bounds.height
+      };
+    }
+
+    async function testCameraPoint(point) {
+      try {
+        const response = await fetch('/api/calibration/camera-to-robot', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(point)
+        });
+        const result = await response.json();
+        if (!response.ok) throw new Error(result.detail || `HTTP ${response.status}`);
+        calibrationResult.textContent =
+          `Camera (${point.x.toFixed(1)}, ${point.y.toFixed(1)}) → ` +
+          `Screen (${result.screen.x.toFixed(2)}, ${result.screen.y.toFixed(2)}) → ` +
+          `Robot (${result.robot.x.toFixed(2)}, ${result.robot.y.toFixed(2)})`;
+        calibrationResult.className = '';
+      } catch (error) {
+        calibrationResult.textContent = `Calibration error: ${error.message}`;
+        calibrationResult.className = 'error';
+      }
+    }
+
+    camera.addEventListener('click', async event => {
+      if (!camera.naturalWidth || !camera.naturalHeight) return;
+      const point = clickedCameraPoint(event);
+      if (selectingCorners) {
+        if (cameraCorners.length < 4) cameraCorners.push(point);
+        if (cameraCorners.length === 4) {
+          selectingCorners = false;
+          calibrationResult.textContent = 'Four corners selected. Enter robot points and save.';
+        }
+        renderCornerMarkers();
+      } else {
+        await testCameraPoint(point);
+      }
+    });
+    camera.addEventListener('load', renderCornerMarkers);
+
+    document.querySelector('#select-corners').addEventListener('click', () => {
+      cameraCorners = [];
+      selectingCorners = true;
+      calibrationResult.textContent = 'Click top-left, top-right, bottom-right, bottom-left.';
+      renderCornerMarkers();
+    });
+
+    document.querySelector('#clear-corners').addEventListener('click', () => {
+      cameraCorners = [];
+      selectingCorners = false;
+      calibrationResult.textContent = '';
+      renderCornerMarkers();
+    });
+
+    document.querySelector('#save-calibration').addEventListener('click', async () => {
+      if (cameraCorners.length !== 4) {
+        calibrationResult.textContent = 'Select exactly four camera corners first.';
+        calibrationResult.className = 'error';
+        return;
+      }
+      const robotPoints = [0, 1, 2, 3].map(index => ({
+        x: Number(document.querySelector(`#robot-${index}-x`).value),
+        y: Number(document.querySelector(`#robot-${index}-y`).value)
+      }));
+      const payload = {
+        profile_name: document.querySelector('#profile-name').value,
+        camera_corners: cameraCorners,
+        robot_points: robotPoints,
+        phone_width: Number(document.querySelector('#phone-width').value),
+        phone_height: Number(document.querySelector('#phone-height').value),
+        camera_width: camera.naturalWidth,
+        camera_height: camera.naturalHeight
+      };
+      try {
+        const response = await fetch('/api/calibration', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload)
+        });
+        const result = await response.json();
+        if (!response.ok) throw new Error(result.detail || `HTTP ${response.status}`);
+        calibrationResult.textContent = `Saved profile “${result.calibration.profile_name}”. Click the camera to test.`;
+        calibrationResult.className = '';
+        await refreshLogs();
+      } catch (error) {
+        calibrationResult.textContent = `Calibration error: ${error.message}`;
+        calibrationResult.className = 'error';
+      }
+    });
+
+    async function loadCalibration() {
+      try {
+        const response = await fetch('/api/calibration');
+        const result = await response.json();
+        if (!result.configured) return;
+        const value = result.calibration;
+        document.querySelector('#profile-name').value = value.profile_name;
+        document.querySelector('#phone-width').value = value.phone_logical_size.width;
+        document.querySelector('#phone-height').value = value.phone_logical_size.height;
+        cameraCorners = value.camera_corners.map(([x, y]) => ({ x, y }));
+        value.robot_points.forEach(([x, y], index) => {
+          document.querySelector(`#robot-${index}-x`).value = x;
+          document.querySelector(`#robot-${index}-y`).value = y;
+        });
+        calibrationResult.textContent = `Loaded profile “${value.profile_name}”. Click the camera to test.`;
+        renderCornerMarkers();
+      } catch (error) {
+        calibrationResult.textContent = `Could not load calibration: ${error.message}`;
+        calibrationResult.className = 'error';
+      }
+    }
+
+    async function refreshStatus() {
+      try {
+        const response = await fetch('/api/status');
+        const value = await response.json();
+        if (!statusBox.classList.contains('error')) {
+          statusBox.textContent =
+            `${value.robot} ${value.robot_connected ? 'online' : 'offline'} · ` +
+            `Camera ${value.camera_opened ? 'online' : 'offline'}`;
+        }
+      } catch (_) {
+        statusBox.textContent = 'Backend unavailable';
+        statusBox.className = 'error';
+      }
+    }
+
+    async function refreshLogs() {
+      try {
+        const response = await fetch(`/api/logs?after_id=${lastLogId}`);
+        const value = await response.json();
+        for (const entry of value.entries) {
+          logOutput.textContent += `[${entry.timestamp}] ${entry.level.toUpperCase()} ${entry.message}\n`;
+          lastLogId = entry.id;
+        }
+        if (value.entries.length) logOutput.scrollTop = logOutput.scrollHeight;
+      } catch (_) {}
+    }
+
+    refreshCamera();
+    refreshVisionDebug();
+    refreshStatus();
+    refreshLogs();
+    loadCalibration();
+    setInterval(refreshCamera, 500);
+    setInterval(refreshVisionDebug, 1000);
+    setInterval(refreshStatus, 2000);
+    setInterval(refreshLogs, 1000);
+  </script>
+</body>
+</html>
