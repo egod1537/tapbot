@@ -18,6 +18,7 @@ dependencies = [
 [project.scripts]
 tapbot-camera-preview = "tapbot.vision.camera:main"
 tapbot-grbl-check = "tapbot.robot.hardware_check:main"
+tapbot-sim = "tapbot.simulation.cli:main"
 tapbot-ui = "tapbot.ui.app:main"
 
 [project.optional-dependencies]
@@ -29,3 +30,6 @@ test = [
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-ra"
+
+[tool.hatch.build.targets.wheel.force-include]
+"fixtures" = "tapbot/fixtures"

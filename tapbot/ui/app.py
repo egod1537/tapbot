@@ -12,7 +12,7 @@ import math
 from pathlib import Path
 from threading import Lock
 from time import perf_counter
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from typing import Annotated, AsyncIterator
 
 import cv2
@@ -22,6 +22,9 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 import uvicorn
 
+from tapbot.camera.manager import CameraManager, CameraSourceNotFoundError
+from tapbot.camera.mock_graph import MockGraphStateError
+from tapbot.camera.source import CameraError, CameraSource
 from tapbot.core.actions import (
     Action,
     EmergencyStopAction,
@@ -46,14 +49,13 @@ from tapbot.robot.grbl import GrblRobotConfig, GrblRobotController, GrblSession
 from tapbot.robot.mock import MockRobotController
 from tapbot.robot.serial_transport import SerialTransport, SerialTransportConfig
 from tapbot.robot.transport import MockTransport
+from tapbot.simulation import SimulationBridge
 from tapbot.ui.services import (
     CameraFrameWorker,
     CameraFrameSnapshot,
-    CameraSource,
     EventLog,
     RobotCommandDispatcher,
 )
-from tapbot.vision.camera import CameraService
 from tapbot.vision.calibration import (
     Calibration,
     CalibrationError,
@@ -84,6 +86,16 @@ class WorkspaceBounds:
 class CoordinateRequest:
     x: float
     y: float
+
+
+@dataclass(frozen=True, slots=True)
+class CameraSourceSelectionRequest:
+    source_id: str
+
+
+@dataclass(frozen=True, slots=True)
+class MockGraphTransitionRequest:
+    state_id: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -123,6 +135,7 @@ def create_app(
     *,
     robot: RobotController | None = None,
     camera: CameraSource | None = None,
+    camera_manager: CameraManager | None = None,
     bounds: WorkspaceBounds | None = None,
     camera_fps: float = 5.0,
     calibration_store: CalibrationStore | None = None,
@@ -131,9 +144,45 @@ def create_app(
     decision_policy: DecisionPolicy | None = None,
 ) -> FastAPI:
     robot = robot or MockRobotController()
-    camera = camera or CameraService(0)
+    if camera is not None and camera_manager is not None:
+        raise ValueError("Provide either camera or camera_manager, not both")
+    if camera_manager is None and camera is None:
+        camera_manager = CameraManager.with_defaults()
+    if camera_manager is not None:
+        camera = camera_manager
+    assert camera is not None
     bounds = bounds or WorkspaceBounds()
     event_log = EventLog()
+
+    def record_simulation_event(
+        event_type: str, payload: Mapping[str, object]
+    ) -> None:
+        messages = {
+            "action.tap": "Mock tap action received",
+            "mock.hit": f"Mock hotspot hit: {payload.get('hotspot_id')}",
+            "mock.miss": "Mock hotspot missed",
+            "mock.transition": (
+                f"Mock screen transition: {payload.get('from_state')} "
+                f"→ {payload.get('to_state')}"
+            ),
+        }
+        event_log.add(
+            messages.get(event_type, f"Simulation event: {event_type}"),
+            event_type=event_type,
+            category="robot" if event_type == "action.tap" else "camera",
+            status="warning" if event_type == "mock.miss" else "success",
+            payload=payload,
+        )
+
+    simulation_bridge = (
+        SimulationBridge(
+            robot,
+            camera_manager,
+            event_recorder=record_simulation_event,
+        )
+        if isinstance(robot, MockRobotController) and camera_manager is not None
+        else None
+    )
     dispatcher = RobotCommandDispatcher(robot, event_log)
     camera_worker = CameraFrameWorker(camera, event_log, fps=camera_fps)
     calibration_store = calibration_store or CalibrationStore("tapbot-calibrations.json")
@@ -181,12 +230,16 @@ def create_app(
                 event_log.add(f"Robot connected: {type(robot).__name__}")
             except Exception as error:
                 event_log.add(f"Robot connection error: {error}", level="error")
+        if simulation_bridge is not None:
+            simulation_bridge.start()
         dispatcher.start()
         camera_worker.start()
         event_log.add("TapBot UI services started")
         try:
             yield
         finally:
+            if simulation_bridge is not None:
+                simulation_bridge.close()
             camera_worker.stop()
             dispatcher.shutdown()
             close_robot = getattr(robot, "close", None)
@@ -218,6 +271,7 @@ def create_app(
     )
     application.state.robot = robot
     application.state.camera = camera
+    application.state.camera_manager = camera_manager
     application.state.bounds = bounds
     application.state.event_log = event_log
     application.state.dispatcher = dispatcher
@@ -226,6 +280,7 @@ def create_app(
     application.state.vision_detectors = vision_detectors
     application.state.model_client = model_client
     application.state.decision_policy = decision_policy
+    application.state.simulation_bridge = simulation_bridge
     robot_state_lock = Lock()
     robot_state: dict[str, object] = {
         "x": 0.0,
@@ -263,6 +318,9 @@ def create_app(
     @application.get("/api/status")
     async def status() -> dict[str, object]:
         snapshot = camera_worker.latest_frame()
+        source_id = getattr(
+            camera, "id", getattr(camera, "source", type(camera).__name__)
+        )
         return {
             "robot": type(robot).__name__,
             "robot_connected": getattr(robot, "is_connected", True),
@@ -271,6 +329,8 @@ def create_app(
             "camera_opened": camera.is_opened(),
             "camera_error": camera_worker.error,
             "camera_frame_id": None if snapshot is None else snapshot.frame_id,
+            "camera_source_id": str(source_id),
+            "camera_source_type": getattr(camera, "source_type", "physical"),
             "robot_queue_depth": dispatcher.pending_count,
             "workspace": asdict(bounds),
             "calibration_profile": (
@@ -440,6 +500,226 @@ def create_app(
             "last_command": state["last_command"],
             "workspace": asdict(bounds),
             "queue_depth": dispatcher.pending_count,
+        }
+
+    @application.get("/api/camera/sources")
+    async def camera_sources(refresh: bool = False) -> dict[str, object]:
+        if camera_manager is not None:
+            descriptors = await asyncio.to_thread(
+                camera_manager.list_sources, refresh=refresh
+            )
+            return {
+                "active_id": camera_manager.active_source_id,
+                "sources": [descriptor.to_dict() for descriptor in descriptors],
+            }
+
+        source_id = str(
+            getattr(camera, "id", getattr(camera, "source", type(camera).__name__))
+        )
+        metadata_getter = getattr(camera, "get_metadata", None)
+        metadata = (
+            metadata_getter()
+            if callable(metadata_getter)
+            else {
+                "width": 0,
+                "height": 0,
+                "fps": camera_fps,
+                "type": "physical",
+                "name": type(camera).__name__,
+            }
+        )
+        return {
+            "active_id": source_id,
+            "sources": [
+                {
+                    "id": source_id,
+                    "name": str(metadata.get("name", type(camera).__name__)),
+                    "type": str(metadata.get("type", "physical")),
+                    "available": camera.is_opened(),
+                    "metadata": metadata,
+                }
+            ],
+        }
+
+    @application.get("/api/camera/status")
+    async def camera_status() -> dict[str, object]:
+        snapshot = camera_worker.latest_frame()
+        if camera_manager is not None:
+            result = camera_manager.status()
+        else:
+            source_id = str(
+                getattr(camera, "id", getattr(camera, "source", type(camera).__name__))
+            )
+            opened = camera.is_opened()
+            result = {
+                "source_id": source_id,
+                "name": getattr(camera, "name", type(camera).__name__),
+                "type": getattr(camera, "source_type", "physical"),
+                "opened": opened,
+                "connected": opened,
+                "state": "connected" if opened else "disconnected",
+                "error": None,
+                "metadata": None,
+                "discovery_completed": False,
+                "mock_graph": None,
+            }
+        if camera_worker.error is not None:
+            result["state"] = "error"
+            result["connected"] = False
+            result["error"] = camera_worker.error
+        result["frame_id"] = None if snapshot is None else snapshot.frame_id
+        return result
+
+    @application.post("/api/camera/source", include_in_schema=False)
+    @application.post("/api/camera/select")
+    async def select_camera_source(
+        payload: CameraSourceSelectionRequest,
+    ) -> dict[str, object]:
+        if camera_manager is None:
+            raise HTTPException(
+                status_code=409,
+                detail="The injected camera source cannot be switched",
+            )
+
+        await asyncio.to_thread(camera_worker.stop)
+        camera_worker.clear()
+        try:
+            camera_manager.select(payload.source_id)
+        except CameraSourceNotFoundError as error:
+            camera_worker.start()
+            raise HTTPException(status_code=404, detail=str(error)) from error
+        except CameraError as error:
+            camera_worker.start()
+            raise HTTPException(status_code=422, detail=str(error)) from error
+
+        camera_worker.start()
+        event_log.add(
+            f"Camera source selected: {payload.source_id}",
+            event_type="camera.source",
+            category="camera",
+            status="success",
+            payload={"source_id": payload.source_id},
+        )
+        return {
+            "active_id": camera_manager.active_source_id,
+            "metadata": camera_manager.get_metadata(),
+        }
+
+    @application.post("/api/camera/reconnect")
+    async def reconnect_camera() -> dict[str, object]:
+        if camera_manager is None:
+            raise HTTPException(
+                status_code=409,
+                detail="The injected camera source cannot be reconnected",
+            )
+
+        await asyncio.to_thread(camera_worker.stop)
+        camera_worker.clear()
+        try:
+            await asyncio.to_thread(camera_manager.reconnect)
+        except CameraError as error:
+            camera_worker.start()
+            raise HTTPException(status_code=503, detail=str(error)) from error
+
+        camera_worker.start()
+        event_log.add(
+            f"Camera source reconnected: {camera_manager.active_source_id}",
+            event_type="camera.reconnect",
+            category="camera",
+            status="success",
+            payload={"source_id": camera_manager.active_source_id},
+        )
+        return camera_manager.status()
+
+    @application.post("/api/camera/reset-graph")
+    async def reset_camera_graph() -> dict[str, object]:
+        if camera_manager is None:
+            raise HTTPException(
+                status_code=409,
+                detail="The injected camera source is not a mock graph",
+            )
+
+        transition = await asyncio.to_thread(camera_manager.reset_mock_graph)
+        if transition is None:
+            raise HTTPException(
+                status_code=409,
+                detail="The active camera source is not a mock graph",
+            )
+        camera_worker.clear()
+        event_log.add(
+            f"Mock camera graph reset: {transition.to_state}",
+            event_type="camera.graph.reset",
+            category="camera",
+            status="success",
+            payload=transition.to_dict(),
+        )
+        return camera_manager.status()
+
+    def mock_graph_status_snapshot() -> dict[str, object]:
+        if camera_manager is None:
+            raise HTTPException(
+                status_code=409,
+                detail="The injected camera source is not a mock graph",
+            )
+        status = camera_manager.mock_graph_status()
+        if status is None:
+            raise HTTPException(
+                status_code=409,
+                detail="The active camera source is not a mock graph",
+            )
+        return status
+
+    @application.get("/api/mock-graph/status")
+    async def mock_graph_status() -> dict[str, object]:
+        return await asyncio.to_thread(mock_graph_status_snapshot)
+
+    @application.post("/api/mock-graph/reset")
+    async def reset_mock_graph() -> dict[str, object]:
+        mock_graph_status_snapshot()
+        assert camera_manager is not None
+        transition = await asyncio.to_thread(camera_manager.reset_mock_graph)
+        assert transition is not None
+        camera_worker.clear()
+        return {
+            "transition": transition.to_dict(),
+            "status": await asyncio.to_thread(mock_graph_status_snapshot),
+        }
+
+    @application.post("/api/mock-graph/tap")
+    async def tap_mock_graph(payload: CoordinateRequest) -> dict[str, object]:
+        mock_graph_status_snapshot()
+        assert camera_manager is not None
+        transition = await asyncio.to_thread(
+            camera_manager.tap, payload.x, payload.y
+        )
+        camera_worker.clear()
+        status = await asyncio.to_thread(mock_graph_status_snapshot)
+        return {
+            "hit": transition is not None,
+            "tap": status["last_tap"],
+            "transition": (
+                None if transition is None else transition.to_dict()
+            ),
+            "status": status,
+        }
+
+    @application.post("/api/mock-graph/transition")
+    async def transition_mock_graph(
+        payload: MockGraphTransitionRequest,
+    ) -> dict[str, object]:
+        mock_graph_status_snapshot()
+        assert camera_manager is not None
+        try:
+            transition = await asyncio.to_thread(
+                camera_manager.transition_mock_graph, payload.state_id
+            )
+        except MockGraphStateError as error:
+            raise HTTPException(status_code=422, detail=str(error)) from error
+        assert transition is not None
+        camera_worker.clear()
+        return {
+            "transition": transition.to_dict(),
+            "status": await asyncio.to_thread(mock_graph_status_snapshot),
         }
 
     @application.get("/api/camera/frame")
@@ -1348,17 +1628,36 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Run the TapBot control UI")
     parser.add_argument(
         "--camera-source",
+        "--camera",
         type=_parse_camera_source,
-        default=0,
-        help="camera device index, video file, or RTSP URL (default: 0)",
+        default="mock:reservation-flow",
+        help=(
+            "source ID (opencv:0 or mock:reservation-flow), device index, "
+            "image path, video path, or stream URL "
+            "(default: mock:reservation-flow)"
+        ),
+    )
+    parser.add_argument(
+        "--camera-max-index",
+        type=int,
+        default=4,
+        help="highest OpenCV device index included in discovery (default: 4)",
     )
     parser.add_argument("--camera-fps", type=float, default=5.0)
     parser.add_argument("--robot", choices=("mock", "grbl"), default="mock")
     parser.add_argument("--serial-port")
     parser.add_argument("--baud-rate", type=int, default=115200)
     parser.add_argument("--feed-rate", type=float, default=1000)
-    parser.add_argument("--workspace-width", type=float, default=300)
-    parser.add_argument("--workspace-height", type=float, default=300)
+    parser.add_argument(
+        "--workspace-width",
+        type=float,
+        help="robot workspace width (default: mock 1280, GRBL 300)",
+    )
+    parser.add_argument(
+        "--workspace-height",
+        type=float,
+        help="robot workspace height (default: mock 720, GRBL 300)",
+    )
     parser.add_argument("--tap-dwell-ms", type=int, default=150)
     parser.add_argument("--servo-down-command", default="M3")
     parser.add_argument("--servo-up-command", default="M5")
@@ -1371,6 +1670,16 @@ def main() -> None:
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8000)
     args = parser.parse_args()
+    workspace_width = (
+        args.workspace_width
+        if args.workspace_width is not None
+        else (1280.0 if args.robot == "mock" else 300.0)
+    )
+    workspace_height = (
+        args.workspace_height
+        if args.workspace_height is not None
+        else (720.0 if args.robot == "mock" else 300.0)
+    )
 
     robot_controller: RobotController
     if args.robot == "grbl":
@@ -1378,8 +1687,8 @@ def main() -> None:
             parser.error("--serial-port is required for GRBL unless --dry-run is used")
         robot_config = GrblRobotConfig(
             feed_rate_mm_per_min=args.feed_rate,
-            workspace_width_mm=args.workspace_width,
-            workspace_height_mm=args.workspace_height,
+            workspace_width_mm=workspace_width,
+            workspace_height_mm=workspace_height,
             tap_dwell_ms=args.tap_dwell_ms,
             servo_down_command=args.servo_down_command,
             servo_up_command=args.servo_up_command,
@@ -1401,12 +1710,15 @@ def main() -> None:
 
     application = create_app(
         robot=robot_controller,
-        camera=CameraService(args.camera_source),
+        camera_manager=CameraManager.with_defaults(
+            args.camera_source,
+            discovery_max_index=args.camera_max_index,
+        ),
         camera_fps=args.camera_fps,
         calibration_store=CalibrationStore(args.calibration_file),
         bounds=WorkspaceBounds(
-            max_x=args.workspace_width,
-            max_y=args.workspace_height,
+            max_x=workspace_width,
+            max_y=workspace_height,
         ),
     )
     uvicorn.run(application, host=args.host, port=args.port)

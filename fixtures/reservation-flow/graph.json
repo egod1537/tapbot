@@ -1,0 +1,65 @@
+{
+  "schema_version": 1,
+  "id": "reservation-flow",
+  "name": "Reservation verification flow",
+  "description": "Exercises reservation entry and photo verification without a real application or personal data.",
+  "screen_width": 1280,
+  "screen_height": 720,
+  "initial_state": "home",
+  "states": {
+    "home": {
+      "id": "home",
+      "image": "home.png",
+      "hotspots": [
+        {
+          "id": "open-reservation",
+          "label": "reservation_button",
+          "x": 460,
+          "y": 500,
+          "width": 360,
+          "height": 80,
+          "next_state": "reservation"
+        }
+      ]
+    },
+    "reservation": {
+      "id": "reservation",
+      "image": "reservation.png",
+      "hotspots": [
+        {
+          "id": "verify-photo",
+          "label": "verify_photo_button",
+          "x": 460,
+          "y": 500,
+          "width": 360,
+          "height": 80,
+          "next_state": "verify-photo"
+        },
+        {
+          "id": "back-home",
+          "label": "back_button",
+          "x": 460,
+          "y": 600,
+          "width": 160,
+          "height": 45,
+          "next_state": "home"
+        }
+      ]
+    },
+    "verify-photo": {
+      "id": "verify-photo",
+      "image": "verify-photo.png",
+      "hotspots": [
+        {
+          "id": "return-home",
+          "label": "home_button",
+          "x": 460,
+          "y": 500,
+          "width": 360,
+          "height": 80,
+          "next_state": "home"
+        }
+      ]
+    }
+  }
+}

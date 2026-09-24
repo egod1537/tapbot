@@ -1,0 +1,12 @@
+{
+  "name": "tapbot-workspace",
+  "private": true,
+  "version": "0.1.0",
+  "scripts": {
+    "dev": "py -3.12 scripts/dev.py",
+    "dev:dry-run": "py -3.12 scripts/dev.py --robot grbl --dry-run",
+    "simulate": "py -3.12 -m tapbot.simulation.cli --camera mock:reservation-flow --robot mock --target-state verify-photo",
+    "validate:fixtures": "py -3.12 scripts/validate_fixtures.py",
+    "setup": "py -3.12 -m pip install -e . && npm --prefix frontend ci"
+  }
+}

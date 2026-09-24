@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import argparse
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass
 import logging
 from os import PathLike, fspath
 from pathlib import Path
@@ -12,30 +11,26 @@ import time
 from typing import Protocol, TypeAlias
 
 import cv2
-import numpy as np
-from numpy.typing import NDArray
+
+from tapbot.camera.opencv_source import create_opencv_capture
+from tapbot.camera.source import (
+    BGRFrame,
+    CameraError,
+    CameraMetadata,
+    CameraNotOpenError,
+    CameraOpenError,
+    CameraReadError,
+    CameraSource as CameraSourceBase,
+    CameraSourceType,
+    FrameInfo,
+    base_metadata,
+    validate_bgr_frame,
+)
 
 
 logger = logging.getLogger(__name__)
 
-CameraSource: TypeAlias = int | str | PathLike[str]
-BGRFrame: TypeAlias = NDArray[np.uint8]
-
-
-class CameraError(RuntimeError):
-    """Base class for camera service failures."""
-
-
-class CameraOpenError(CameraError):
-    """Raised when the configured source cannot be opened."""
-
-
-class CameraNotOpenError(CameraError):
-    """Raised when capture is attempted before opening the camera."""
-
-
-class CameraReadError(CameraError):
-    """Raised when an opened camera fails to provide a frame."""
+LegacyCameraInput: TypeAlias = int | str | PathLike[str]
 
 
 class FrameSaveError(CameraError):
@@ -54,16 +49,7 @@ class CaptureDevice(Protocol):
     def get(self, property_id: int) -> float: ...
 
 
-@dataclass(frozen=True, slots=True)
-class FrameInfo:
-    """Metadata for the most recently captured BGR frame."""
-
-    timestamp: float
-    width: int
-    height: int
-
-
-class CameraService:
+class CameraService(CameraSourceBase):
     """Own an OpenCV capture source behind a small, testable API.
 
     ``read_frame`` returns the untouched BGR array supplied by OpenCV. Metadata
@@ -72,13 +58,26 @@ class CameraService:
 
     def __init__(
         self,
-        source: CameraSource = 0,
+        source: LegacyCameraInput = 0,
         *,
-        capture_factory: Callable[[int | str], CaptureDevice] = cv2.VideoCapture,
+        capture_factory: Callable[[int | str], CaptureDevice] = create_opencv_capture,
         image_writer: Callable[[str, BGRFrame], bool] = cv2.imwrite,
         clock: Callable[[], float] = time.time,
     ) -> None:
         self.source = source
+        self.id = (
+            f"opencv:{source}"
+            if isinstance(source, int)
+            else f"video:{Path(fspath(source)).stem or 'stream'}"
+        )
+        self.name = (
+            f"OpenCV Camera {source}"
+            if isinstance(source, int)
+            else Path(fspath(source)).name or fspath(source)
+        )
+        self.source_type: CameraSourceType = (
+            "physical" if isinstance(source, int) else "video"
+        )
         self._capture_factory = capture_factory
         self._image_writer = image_writer
         self._clock = clock
@@ -116,8 +115,7 @@ class CameraService:
             raise CameraReadError(
                 f"Failed to read a frame from camera source: {self.source!r}"
             )
-        if not isinstance(frame, np.ndarray) or frame.ndim < 2:
-            raise CameraReadError("Camera returned an invalid frame")
+        frame = validate_bgr_frame(frame, source_id=self.id)
 
         height, width = frame.shape[:2]
         self._last_frame = frame
@@ -164,6 +162,35 @@ class CameraService:
             int(capture.get(cv2.CAP_PROP_FRAME_WIDTH)),
             int(capture.get(cv2.CAP_PROP_FRAME_HEIGHT)),
         )
+
+    def get_metadata(self) -> CameraMetadata:
+        """Return the metadata shared by all camera source implementations."""
+
+        if self.is_opened():
+            width, height = self.get_resolution()
+            fps = max(float(self._require_open_capture().get(cv2.CAP_PROP_FPS)), 0.0)
+        else:
+            width = height = 0
+            fps = 0.0
+        return base_metadata(
+            name=self.name,
+            source_type=self.source_type,
+            width=width,
+            height=height,
+            fps=fps,
+        )
+
+    def is_available(self) -> bool:
+        if self.is_opened():
+            return True
+        normalized_source = (
+            fspath(self.source) if isinstance(self.source, PathLike) else self.source
+        )
+        capture = self._capture_factory(normalized_source)
+        try:
+            return capture.isOpened()
+        finally:
+            capture.release()
 
     @property
     def last_frame_info(self) -> FrameInfo | None:

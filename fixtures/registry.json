@@ -1,0 +1,9 @@
+{
+  "schema_version": 1,
+  "scenarios": [
+    {
+      "id": "reservation-flow",
+      "graph": "reservation-flow/graph.json"
+    }
+  ]
+}

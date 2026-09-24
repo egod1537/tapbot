@@ -690,9 +690,13 @@ select:focus-visible {
   min-height: 402px;
 }
 
+.camera-panel {
+  min-height: 500px;
+}
+
 .camera-panel .panel__body {
   display: grid;
-  grid-template-rows: 44px minmax(337px, 1fr) 34px;
+  grid-template-rows: 44px auto minmax(300px, 1fr) 34px;
   height: calc(100% - 64px);
 }
 
@@ -703,12 +707,141 @@ select:focus-visible {
 
 .camera-toolbar {
   display: grid;
-  grid-template-columns: auto 1fr auto;
+  grid-template-columns: auto minmax(0, 1fr) auto;
   align-items: center;
   gap: 14px;
   padding: 0 12px;
   border-bottom: 1px solid var(--line-soft);
   background: #0d120f;
+}
+
+.camera-toolbar .overlay-toggles {
+  justify-self: end;
+}
+
+.camera-source-bar {
+  display: grid;
+  grid-template-columns: minmax(170px, 0.8fr) minmax(300px, 1.5fr) auto;
+  align-items: center;
+  gap: 8px 14px;
+  min-width: 0;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--line-soft);
+  background: #0a0f0c;
+}
+
+.camera-source-select {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.camera-source-select > span {
+  color: #657169;
+  font-family: var(--mono);
+  font-size: 7px;
+  font-weight: 600;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+}
+
+.camera-source-select select {
+  min-width: 0;
+  width: 100%;
+  height: 26px;
+  padding: 0 24px 0 8px;
+  border-color: var(--line);
+  color: #a4aea7;
+  background-color: #101612;
+  font-family: var(--mono);
+  font-size: 8px;
+}
+
+.camera-source-details {
+  display: flex;
+  align-items: center;
+  gap: 6px 12px;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+}
+
+.camera-source-details > span {
+  color: #6f7a73;
+  font-family: var(--mono);
+  font-size: 7px;
+}
+
+.camera-source-details strong {
+  color: #aab4ad;
+  font-weight: 600;
+}
+
+.camera-source-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: #7d8881;
+  text-transform: uppercase;
+}
+
+.camera-source-status::before {
+  width: 5px;
+  height: 5px;
+  content: '';
+  border-radius: 50%;
+  background: currentcolor;
+}
+
+.camera-source-status.is-connected {
+  color: var(--accent);
+}
+
+.camera-source-status.is-loading {
+  color: var(--amber);
+}
+
+.camera-source-status.is-offline {
+  color: #8b7673;
+}
+
+.camera-source-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 5px;
+}
+
+.camera-source-actions button {
+  height: 26px;
+  padding: 0 8px;
+  border: 1px solid var(--line);
+  border-radius: 3px;
+  color: #89958d;
+  background: #151b17;
+  font-family: var(--mono);
+  font-size: 7px;
+  text-transform: uppercase;
+}
+
+.camera-source-actions button:hover:not(:disabled) {
+  border-color: #4d5a52;
+  color: #d1d8d3;
+}
+
+.camera-source-actions button:disabled,
+.camera-source-select select:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+
+.camera-source-error {
+  grid-column: 1 / -1;
+  margin: -1px 0 0;
+  color: var(--danger);
+  font-family: var(--mono);
+  font-size: 7px;
 }
 
 .view-switch {
@@ -3695,6 +3828,373 @@ select:focus-visible {
   background: #0a0e0b;
 }
 
+.mock-graph-panel .panel__body {
+  display: grid;
+  gap: 14px;
+  padding: 18px;
+}
+
+.mock-graph-panel .empty-state {
+  min-height: 260px;
+}
+
+.mock-graph-source {
+  padding: 4px 7px;
+  border: 1px solid var(--line);
+  border-radius: 99px;
+  color: #6c7770;
+  font-family: var(--mono);
+  font-size: 7px;
+}
+
+.mock-graph-source.is-active {
+  border-color: rgb(183 246 55 / 24%);
+  color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.mock-graph-summary {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  overflow: hidden;
+}
+
+.mock-graph-summary > div {
+  display: grid;
+  min-height: 64px;
+  align-content: center;
+  gap: 5px;
+  padding: 10px 12px;
+  border-right: 1px solid var(--line-soft);
+  background: #0a0f0c;
+}
+
+.mock-graph-summary > div:last-child {
+  border-right: 0;
+}
+
+.mock-graph-summary span,
+.mock-graph-controls label > span {
+  color: #536058;
+  font-family: var(--mono);
+  font-size: 6px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.mock-graph-summary strong {
+  min-width: 0;
+  overflow: hidden;
+  color: #cbd4ce;
+  font-family: var(--mono);
+  font-size: 9px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.mock-graph-summary small {
+  color: var(--amber);
+  font-family: var(--mono);
+  font-size: 6px;
+  text-transform: uppercase;
+}
+
+.mock-graph-controls {
+  display: grid;
+  grid-template-columns: minmax(160px, 1fr) auto 100px 100px auto auto;
+  align-items: end;
+  gap: 7px;
+}
+
+.mock-graph-controls label {
+  display: grid;
+  gap: 5px;
+}
+
+.mock-graph-controls input,
+.mock-graph-controls select,
+.mock-graph-controls button {
+  height: 30px;
+  border: 1px solid var(--line);
+  border-radius: 3px;
+  color: #aab5ad;
+  background: #101612;
+  font-family: var(--mono);
+  font-size: 8px;
+}
+
+.mock-graph-controls input,
+.mock-graph-controls select {
+  width: 100%;
+  min-width: 0;
+  padding: 0 8px;
+}
+
+.mock-graph-controls button {
+  padding: 0 11px;
+  text-transform: uppercase;
+}
+
+.mock-graph-controls button:hover:not(:disabled) {
+  border-color: rgb(183 246 55 / 32%);
+  color: var(--accent);
+}
+
+.mock-graph-controls button:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+
+.mock-graph-controls .mock-graph-reset {
+  border-color: rgb(255 197 91 / 22%);
+  color: var(--amber);
+}
+
+.mock-graph-notice {
+  margin: -4px 0 0;
+  padding: 7px 9px;
+  border: 1px solid var(--line);
+  border-radius: 3px;
+  font-family: var(--mono);
+  font-size: 8px;
+}
+
+.mock-graph-notice.is-success {
+  border-color: rgb(183 246 55 / 22%);
+  color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.mock-graph-notice.is-warning {
+  border-color: rgb(255 197 91 / 24%);
+  color: var(--amber);
+  background: var(--amber-soft);
+}
+
+.mock-graph-notice.is-error {
+  border-color: rgb(255 104 98 / 24%);
+  color: var(--danger);
+  background: var(--danger-soft);
+}
+
+.mock-graph-workspace {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 250px;
+  min-height: 390px;
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  overflow: hidden;
+}
+
+.mock-graph-preview {
+  position: relative;
+  display: grid;
+  min-height: 390px;
+  overflow: hidden;
+  place-items: center;
+  background: #050806;
+}
+
+.mock-graph-preview > img,
+.mock-graph-preview > svg {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+}
+
+.mock-graph-preview > img {
+  object-fit: contain;
+  user-select: none;
+}
+
+.mock-graph-preview > svg {
+  z-index: 2;
+}
+
+.mock-hotspot {
+  cursor: crosshair;
+}
+
+.mock-hotspot rect {
+  fill: rgb(112 183 255 / 8%);
+  stroke: #70b7ff;
+  stroke-width: 2;
+  vector-effect: non-scaling-stroke;
+}
+
+.mock-hotspot text {
+  fill: #b8dcff;
+  stroke: #071018;
+  stroke-width: 4;
+  paint-order: stroke;
+  font-family: var(--mono);
+  font-size: 14px;
+  font-weight: 600;
+  pointer-events: none;
+}
+
+.mock-hotspot.is-highlighted rect {
+  fill: rgb(183 246 55 / 15%);
+  stroke: var(--accent);
+  stroke-width: 3;
+}
+
+.mock-hotspot.is-highlighted text {
+  fill: var(--accent);
+}
+
+.mock-hotspot-list {
+  min-width: 0;
+  border-left: 1px solid var(--line);
+  background: #090e0b;
+}
+
+.mock-hotspot-list > header,
+.mock-graph-overview section > header {
+  display: flex;
+  min-height: 38px;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 11px;
+  border-bottom: 1px solid var(--line-soft);
+  color: #69756d;
+  font-family: var(--mono);
+  font-size: 7px;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+}
+
+.mock-hotspot-list > header strong,
+.mock-graph-overview section > header span {
+  color: var(--accent);
+}
+
+.mock-hotspot-list > p {
+  margin: 0;
+  padding: 18px 12px;
+  color: #59655d;
+  font-family: var(--mono);
+  font-size: 8px;
+}
+
+.mock-hotspot-list > button {
+  display: grid;
+  width: 100%;
+  gap: 4px;
+  padding: 11px 12px;
+  border: 0;
+  border-bottom: 1px solid var(--line-soft);
+  color: #748078;
+  background: transparent;
+  font-family: var(--mono);
+  font-size: 7px;
+  text-align: left;
+}
+
+.mock-hotspot-list > button:hover,
+.mock-hotspot-list > button.is-highlighted {
+  color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.mock-hotspot-list > button strong {
+  color: #c3ccc6;
+  font-size: 9px;
+}
+
+.mock-hotspot-list > button small {
+  color: #566159;
+}
+
+.mock-hotspot-list > button em {
+  color: #70b7ff;
+  font-style: normal;
+}
+
+.mock-graph-overview {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  overflow: hidden;
+}
+
+.mock-graph-overview > section + section {
+  border-left: 1px solid var(--line);
+}
+
+.mock-graph-overview h3 {
+  margin: 0;
+  color: #7e8982;
+  font-size: 8px;
+  font-weight: 500;
+}
+
+.mock-node-list,
+.mock-edge-list {
+  display: grid;
+  max-height: 220px;
+  overflow: auto;
+}
+
+.mock-node-list {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  padding: 8px;
+  gap: 6px;
+}
+
+.mock-node-list button {
+  display: grid;
+  gap: 4px;
+  padding: 9px;
+  border: 1px solid var(--line-soft);
+  border-radius: 3px;
+  color: #5f6b63;
+  background: #0b100d;
+  font-family: var(--mono);
+  font-size: 7px;
+  text-align: left;
+}
+
+.mock-node-list button:hover,
+.mock-node-list button.is-current {
+  border-color: rgb(183 246 55 / 30%);
+  color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.mock-node-list strong {
+  color: #c3ccc6;
+  font-size: 9px;
+}
+
+.mock-edge-list > div {
+  display: grid;
+  grid-template-columns: minmax(80px, 1fr) auto minmax(80px, 1fr) minmax(100px, 1fr);
+  align-items: center;
+  gap: 8px;
+  min-height: 35px;
+  padding: 0 10px;
+  border-bottom: 1px solid var(--line-soft);
+  color: #657169;
+  font-family: var(--mono);
+  font-size: 7px;
+}
+
+.mock-edge-list strong {
+  color: #aeb8b1;
+}
+
+.mock-edge-list small {
+  overflow: hidden;
+  color: #70b7ff;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .timeline-panel {
   grid-column: 1 / -1;
   min-height: 242px;
@@ -4420,6 +4920,14 @@ select:focus-visible {
     border-bottom: 1px solid var(--line);
   }
 
+  .mock-graph-controls {
+    grid-template-columns: minmax(160px, 1fr) auto 90px 90px auto auto;
+  }
+
+  .mock-graph-workspace {
+    grid-template-columns: minmax(0, 1fr) 220px;
+  }
+
   .camera-panel,
   .robot-panel,
   .vision-panel,
@@ -4529,6 +5037,50 @@ select:focus-visible {
     flex: 1;
   }
 
+  .mock-graph-panel .panel__body {
+    padding: 12px;
+  }
+
+  .mock-graph-summary,
+  .mock-graph-overview {
+    grid-template-columns: 1fr;
+  }
+
+  .mock-graph-summary > div {
+    border-right: 0;
+    border-bottom: 1px solid var(--line-soft);
+  }
+
+  .mock-graph-summary > div:last-child {
+    border-bottom: 0;
+  }
+
+  .mock-graph-controls {
+    grid-template-columns: 1fr 1fr;
+  }
+
+  .mock-graph-controls label:first-child {
+    grid-column: 1 / -1;
+  }
+
+  .mock-graph-workspace {
+    grid-template-columns: 1fr;
+  }
+
+  .mock-hotspot-list {
+    border-top: 1px solid var(--line);
+    border-left: 0;
+  }
+
+  .mock-graph-overview > section + section {
+    border-top: 1px solid var(--line);
+    border-left: 0;
+  }
+
+  .mock-node-list {
+    grid-template-columns: 1fr;
+  }
+
   .panel__header {
     padding: 0 14px;
   }
@@ -4538,7 +5090,7 @@ select:focus-visible {
   }
 
   .camera-panel .panel__body {
-    grid-template-rows: 78px minmax(270px, 1fr) 34px;
+    grid-template-rows: 80px auto minmax(270px, 1fr) 34px;
   }
 
   .camera-toolbar {
@@ -4550,6 +5102,24 @@ select:focus-visible {
 
   .overlay-toggles {
     grid-column: 1 / -1;
+    grid-row: 2;
+    justify-self: start;
+  }
+
+  .camera-source-bar {
+    grid-template-columns: 1fr;
+    gap: 8px;
+  }
+
+  .camera-source-details {
+    flex-wrap: wrap;
+    overflow: visible;
+    white-space: normal;
+  }
+
+  .camera-source-actions {
+    justify-content: flex-start;
+    flex-wrap: wrap;
   }
 
   .camera-stage {
@@ -4823,5 +5393,473 @@ select:focus-visible {
 
   .settings-values {
     grid-template-columns: 1fr;
+  }
+}
+
+/* Camera + Vision workspace. Blueprint owns controls and component states;
+   these rules are limited to workspace layout and preview sizing. */
+.vision-app-shell {
+  min-height: 100vh;
+  color: #f6f7f9;
+  background: #111418;
+  --bg: #111418;
+  --panel: #1c2127;
+  --panel-raised: #252a31;
+  --panel-soft: #20252b;
+  --line: #383e47;
+  --line-soft: #2f343c;
+  --muted: #a7b0bd;
+  --muted-2: #7c8796;
+  --text: #f6f7f9;
+  --accent: #4c90f0;
+  --accent-soft: rgb(76 144 240 / 12%);
+}
+
+.vision-app-shell .route-content {
+  min-height: calc(100vh - 50px);
+  padding-top: 50px;
+}
+
+.vision-navbar.bp6-navbar {
+  height: 50px;
+  padding: 0 max(24px, calc((100vw - 1440px) / 2));
+  border-bottom: 1px solid #383e47;
+  box-shadow: none;
+  background: #1c2127;
+}
+
+.vision-navbar__brand {
+  margin-right: 2px;
+  color: #f6f7f9;
+  font-size: 15px;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+}
+
+.vision-navbar__workspace {
+  color: #a7b0bd;
+  font-size: 13px;
+}
+
+.vision-navbar__status {
+  gap: 8px;
+}
+
+.vision-navbar__status > span:not(.bp6-tag) {
+  margin-left: 10px;
+  color: #8f99a8;
+  font-size: 11px;
+}
+
+.vision-workspace-page {
+  display: grid;
+  width: min(1440px, 100%);
+  gap: 32px;
+  padding: 28px 24px 52px;
+  margin: 0 auto;
+}
+
+.focused-section-heading {
+  display: flex;
+  min-height: 45px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 0 2px 10px;
+}
+
+.focused-section-heading > div {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+}
+
+.focused-section-heading span {
+  color: #8f99a8;
+  font-size: 11px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.focused-section-heading h1 {
+  margin: 0;
+  font-size: 20px;
+  font-weight: 600;
+}
+
+.focused-panel.bp6-card {
+  padding: 0;
+  overflow: hidden;
+  border: 1px solid #383e47;
+  border-radius: 6px;
+  box-shadow: 0 2px 8px rgb(0 0 0 / 22%);
+  background: #1c2127;
+}
+
+.focused-camera-stage {
+  position: relative;
+  display: grid;
+  width: 100%;
+  min-height: 480px;
+  max-height: 72vh;
+  overflow: hidden;
+  place-items: center;
+  aspect-ratio: 16 / 9;
+  border-bottom: 1px solid #383e47;
+  background: #0b0e11;
+}
+
+.focused-camera-stage > img,
+.focused-camera-stage > .camera-overlay {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+}
+
+.focused-camera-stage > img {
+  object-fit: contain;
+  user-select: none;
+}
+
+.focused-camera-stage > .camera-overlay {
+  z-index: 2;
+  pointer-events: none;
+}
+
+.focused-frame-meta {
+  position: absolute;
+  z-index: 3;
+  right: 12px;
+  bottom: 12px;
+  display: flex;
+  gap: 6px;
+  padding: 6px;
+  border-radius: 4px;
+  background: rgb(17 20 24 / 82%);
+  backdrop-filter: blur(8px);
+}
+
+.focused-stage-state {
+  display: grid;
+  max-width: 520px;
+  justify-items: center;
+  gap: 10px;
+  padding: 24px;
+  color: #8f99a8;
+  text-align: center;
+}
+
+.focused-stage-state strong {
+  color: #d3d8de;
+  font-size: 15px;
+}
+
+.focused-stage-state p {
+  margin: 0 0 12px;
+}
+
+.focused-stage-state--overlay {
+  position: absolute;
+  z-index: 5;
+  inset: 0;
+  max-width: none;
+  place-content: center;
+  background: rgb(11 14 17 / 72%);
+  backdrop-filter: blur(2px);
+}
+
+.focused-inline-callout.bp6-callout {
+  margin: 12px;
+}
+
+.focused-inline-callout .bp6-button {
+  margin-left: 10px;
+}
+
+.focused-camera-controls {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: end;
+  gap: 18px;
+  padding: 16px;
+}
+
+.vision-workspace-page .camera-source-bar {
+  display: grid;
+  min-width: 0;
+  grid-template-columns: minmax(220px, 340px) minmax(0, 1fr) auto;
+  align-items: end;
+  gap: 12px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+}
+
+.focused-source-select,
+.focused-frame-select {
+  display: grid;
+  min-width: 0;
+  gap: 6px;
+}
+
+.focused-control-label {
+  color: #8f99a8;
+  font-size: 11px;
+}
+
+.focused-source-meta {
+  display: flex;
+  min-width: 0;
+  min-height: 30px;
+  align-items: center;
+  gap: 8px;
+  overflow: hidden;
+  color: #a7b0bd;
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.focused-source-actions {
+  justify-self: end;
+}
+
+.focused-source-error.bp6-callout {
+  grid-column: 1 / -1;
+  padding: 8px 10px;
+}
+
+.focused-view-control {
+  display: grid;
+  gap: 6px;
+}
+
+.focused-vision-grid {
+  display: grid;
+  min-height: 440px;
+  grid-template-columns: minmax(0, 1.65fr) minmax(320px, 0.75fr);
+}
+
+.focused-vision-preview,
+.focused-detections {
+  display: grid;
+  min-width: 0;
+  grid-template-rows: auto minmax(0, 1fr);
+}
+
+.focused-detections {
+  grid-template-rows: auto auto minmax(0, 1fr);
+  border-left: 1px solid #383e47;
+  background: #181c21;
+}
+
+.focused-subheading {
+  display: flex;
+  min-height: 48px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 0 16px;
+  color: #d3d8de;
+}
+
+.focused-subheading > span {
+  color: #8f99a8;
+  font-size: 11px;
+}
+
+.focused-vision-stage {
+  position: relative;
+  display: grid;
+  min-height: 390px;
+  overflow: hidden;
+  place-items: center;
+  background: #0b0e11;
+}
+
+.focused-vision-stage > img,
+.focused-vision-stage > .vision-detection-overlay {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+}
+
+.focused-vision-stage > img {
+  object-fit: contain;
+}
+
+.focused-detection-list {
+  min-height: 0;
+  max-height: 520px;
+  padding: 8px;
+  overflow: auto;
+}
+
+.focused-list-empty {
+  display: grid;
+  height: 100%;
+  min-height: 180px;
+  place-items: center;
+  padding: 24px;
+  color: #8f99a8;
+  font-size: 12px;
+  text-align: center;
+}
+
+.focused-detection-row.bp6-button {
+  height: auto;
+  min-height: 64px;
+  margin-bottom: 4px;
+  padding: 9px 10px;
+}
+
+.focused-detection-row .bp6-button-text {
+  display: grid;
+  width: 100%;
+  gap: 6px;
+}
+
+.focused-detection-row__main {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.focused-detection-row__secondary {
+  overflow: hidden;
+  color: #8f99a8;
+  font-family: var(--mono);
+  font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.vision-workspace-page .vision-overlay-detection {
+  color: #8abbff;
+}
+
+.vision-workspace-page .vision-overlay-detection.is-highlighted,
+.vision-workspace-page .vision-overlay-detection.is-selected {
+  color: #4c90f0;
+}
+
+.vision-workspace-page .vision-overlay-detection.is-highlighted rect,
+.vision-workspace-page .vision-overlay-detection.is-selected rect {
+  fill: rgb(76 144 240 / 14%);
+}
+
+.focused-vision-controls {
+  display: grid;
+  grid-template-columns: auto minmax(240px, 340px) minmax(300px, 1fr);
+  align-items: end;
+  gap: 24px;
+  padding: 18px 16px 20px;
+}
+
+.focused-vision-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.focused-threshold {
+  display: grid;
+  gap: 9px;
+  padding: 0 10px 3px;
+}
+
+.focused-threshold > div:first-child {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.focused-threshold strong {
+  color: #d3d8de;
+  font-size: 12px;
+}
+
+@media (max-width: 1199px) {
+  .focused-camera-stage {
+    min-height: 390px;
+  }
+
+  .focused-camera-controls,
+  .focused-vision-grid,
+  .focused-vision-controls {
+    grid-template-columns: 1fr;
+  }
+
+  .focused-view-control {
+    justify-self: start;
+  }
+
+  .focused-detections {
+    min-height: 300px;
+    border-top: 1px solid #383e47;
+    border-left: 0;
+  }
+
+  .focused-detection-list {
+    max-height: 360px;
+  }
+
+  .focused-vision-controls {
+    align-items: stretch;
+    gap: 16px;
+  }
+}
+
+@media (max-width: 760px) {
+  .vision-navbar.bp6-navbar {
+    padding: 0 12px;
+  }
+
+  .vision-navbar__workspace,
+  .vision-navbar__status > span:not(.bp6-tag) {
+    display: none;
+  }
+
+  .vision-workspace-page {
+    gap: 24px;
+    padding: 20px 12px 36px;
+  }
+
+  .focused-camera-stage {
+    min-height: 260px;
+  }
+
+  .vision-workspace-page .camera-source-bar {
+    grid-template-columns: 1fr;
+    align-items: stretch;
+  }
+
+  .focused-source-meta {
+    flex-wrap: wrap;
+    overflow: visible;
+    white-space: normal;
+  }
+
+  .focused-source-actions {
+    justify-self: start;
+  }
+
+  .focused-vision-stage {
+    min-height: 280px;
+  }
+
+  .focused-vision-actions {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+  }
+
+  .focused-section-heading > div {
+    display: block;
+  }
+
+  .focused-section-heading > div > span {
+    display: block;
+    margin-bottom: 3px;
   }
 }

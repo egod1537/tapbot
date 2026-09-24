@@ -1,5 +1,10 @@
-import { ApiError } from '../../lib/api-client'
+import { ApiError, apiClient } from '../../lib/api-client'
 import { apiUrl, appConfig } from '../../lib/config'
+import type {
+  CameraSourceSelectionResponse,
+  CameraSourcesResponse,
+  CameraSourceStatus,
+} from '../../types/camera'
 
 export interface CameraFrameResponse {
   frameId: number
@@ -107,4 +112,27 @@ export async function freezeCameraFrame(): Promise<CameraFrameResponse> {
     window.clearTimeout(timeout)
   }
   return parseCameraResponse(response)
+}
+
+export function fetchCameraSources(signal?: AbortSignal, refresh = false) {
+  const query = refresh ? '?refresh=true' : ''
+  return apiClient.get<CameraSourcesResponse>(`camera/sources${query}`, { signal })
+}
+
+export function fetchCameraStatus(signal?: AbortSignal) {
+  return apiClient.get<CameraSourceStatus>('camera/status', { signal })
+}
+
+export function selectCameraSource(sourceId: string) {
+  return apiClient.post<CameraSourceSelectionResponse>('camera/select', {
+    source_id: sourceId,
+  })
+}
+
+export function reconnectCameraSource() {
+  return apiClient.post<CameraSourceStatus>('camera/reconnect')
+}
+
+export function resetMockCameraGraph() {
+  return apiClient.post<CameraSourceStatus>('camera/reset-graph')
 }

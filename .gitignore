@@ -9,3 +9,5 @@ node_modules/
 frontend/dist/
 frontend/.env.local
 frontend/.env.*.local
+/simulation-trace.json
+/replay-trace.json

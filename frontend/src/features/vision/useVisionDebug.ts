@@ -75,35 +75,43 @@ export function useVisionDebug() {
         visionApi.frames(),
       ])
       const detectorTypes = capabilityResult.detectors.map((detector) => detector.type)
-      let availableFrames = frameResult.frames
-      if (availableFrames.length === 0) {
-        const saved = await visionApi.saveFrame()
-        availableFrames = [saved.frame]
-      }
-      const firstFrame = availableFrames[0]
       setCapabilities(capabilityResult)
       setEnabledDetectorTypes(detectorTypes)
-      setFrames(availableFrames)
-      setSelectedFrameId(firstFrame?.frame_id ?? null)
-      if (firstFrame) {
-        await executeRun(
-          firstFrame.frame_id,
-          detectorTypes,
-          DEFAULT_CONFIDENCE_THRESHOLD,
-          false,
-        )
-      }
+      setFrames(frameResult.frames)
+      setSelectedFrameId(frameResult.frames[0]?.frame_id ?? null)
     } catch (requestError) {
       setError(errorMessage(requestError))
     } finally {
       setLoading(false)
     }
-  }, [executeRun])
+  }, [])
 
   useEffect(() => {
     const initialRequest = window.setTimeout(() => void initialize(), 0)
     return () => window.clearTimeout(initialRequest)
   }, [initialize])
+
+  const saveFrame = async (): Promise<number | null> => {
+    if (isSaving || isRunning) return null
+    setSaving(true)
+    setError(null)
+    try {
+      const saved = await visionApi.saveFrame()
+      setFrames((current) =>
+        [
+          saved.frame,
+          ...current.filter((frame) => frame.frame_id !== saved.frame.frame_id),
+        ].slice(0, capabilities?.max_saved_frames ?? 8),
+      )
+      setSelectedFrameId(saved.frame.frame_id)
+      return saved.frame.frame_id
+    } catch (requestError) {
+      setError(errorMessage(requestError))
+      return null
+    } finally {
+      setSaving(false)
+    }
+  }
 
   const saveAndRun = async () => {
     if (isSaving || isRunning) return
@@ -163,7 +171,10 @@ export function useVisionDebug() {
     isRunning,
     isSaving,
     retry: () => void initialize(),
+    saveFrame: () => void saveFrame(),
     saveAndRun: () => void saveAndRun(),
     runSelected,
   }
 }
+
+export type VisionDebugController = ReturnType<typeof useVisionDebug>

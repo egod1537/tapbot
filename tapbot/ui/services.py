@@ -11,16 +11,15 @@ import logging
 from queue import PriorityQueue
 from threading import Event, Lock, Thread
 from time import perf_counter
-from typing import Protocol
 
 import cv2
 import numpy as np
 from numpy.typing import NDArray
 
+from tapbot.camera.source import CameraError, CameraSource
 from tapbot.core.actions import Action, EmergencyStopAction
 from tapbot.core.executor import ActionExecutor
 from tapbot.robot.controller import RobotController
-from tapbot.vision.camera import CameraError
 
 
 logger = logging.getLogger(__name__)
@@ -245,18 +244,6 @@ class RobotCommandDispatcher:
                 self._queue.task_done()
 
 
-class CameraSource(Protocol):
-    source: object
-
-    def open(self) -> None: ...
-
-    def read_frame(self) -> NDArray[np.uint8]: ...
-
-    def close(self) -> None: ...
-
-    def is_opened(self) -> bool: ...
-
-
 @dataclass(frozen=True, slots=True)
 class CameraFrameSnapshot:
     frame_id: int
@@ -343,10 +330,24 @@ class CameraFrameWorker:
         with self._lock:
             return self._error
 
+    def clear(self) -> None:
+        """Discard frames and errors when the active source changes."""
+
+        with self._lock:
+            self._frame = None
+            self._snapshot = None
+            self._frozen_frames.clear()
+            self._error = None
+
     def _run(self) -> None:
         try:
             self.camera.open()
-            self._event_log.add(f"Camera opened: {self.camera.source!r}")
+            source_id = getattr(
+                self.camera,
+                "id",
+                getattr(self.camera, "source", type(self.camera).__name__),
+            )
+            self._event_log.add(f"Camera opened: {source_id!r}")
             while not self._stop.is_set():
                 try:
                     frame = self.camera.read_frame()

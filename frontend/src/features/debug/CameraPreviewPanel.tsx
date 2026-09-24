@@ -3,6 +3,7 @@ import { EmptyState } from '../../components/EmptyState'
 import { Panel } from '../../components/Panel'
 import { CameraIcon } from '../../components/icons'
 import { CameraOverlay } from '../camera/CameraOverlay'
+import { CameraSourceSelector } from '../camera/CameraSourceSelector'
 import { buildDebugOverlayFixture } from '../camera/debug-overlay-fixture'
 import type { CameraStreamController } from '../camera/useCameraStream'
 
@@ -111,6 +112,8 @@ export function CameraPreviewPanel({ camera }: CameraPreviewPanelProps) {
           Screenshot
         </button>
       </div>
+
+      <CameraSourceSelector camera={camera} />
 
       <div className="camera-stage">
         {camera.frame ? (

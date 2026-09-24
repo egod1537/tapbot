@@ -2,12 +2,24 @@ import { useState } from 'react'
 import { CalibrationPanel } from '../calibration/CalibrationPanel'
 import { useCameraStream } from '../camera/useCameraStream'
 import { GcodeConsolePanel } from '../gcode/GcodeConsolePanel'
+import { MockGraphDebugPanel } from '../mock-graph/MockGraphDebugPanel'
 
-type DeveloperTool = 'calibration' | 'gcode'
+type DeveloperTool = 'calibration' | 'mock-graph' | 'gcode'
 
 function CalibrationTool() {
   const camera = useCameraStream()
   return <CalibrationPanel camera={camera} />
+}
+
+function MockGraphTool() {
+  const camera = useCameraStream()
+  return <MockGraphDebugPanel camera={camera} />
+}
+
+function ActiveTool({ tool }: { tool: DeveloperTool }) {
+  if (tool === 'calibration') return <CalibrationTool />
+  if (tool === 'mock-graph') return <MockGraphTool />
+  return <GcodeConsolePanel />
 }
 
 export function DeveloperToolsDrawer() {
@@ -22,9 +34,18 @@ export function DeveloperToolsDrawer() {
       <header>
         <div>
           <p className="eyebrow">Isolated developer tools</p>
-          <h2>Calibration / Low-level Console</h2>
+          <h2>Calibration / Simulation / Low-level Console</h2>
         </div>
         <div className="developer-tabs" role="tablist" aria-label="Developer tools">
+          <button
+            type="button"
+            role="tab"
+            aria-selected={activeTool === 'mock-graph'}
+            className={activeTool === 'mock-graph' ? 'is-active' : undefined}
+            onClick={() => toggleTool('mock-graph')}
+          >
+            Mock Graph
+          </button>
           <button
             type="button"
             role="tab"
@@ -59,7 +80,7 @@ export function DeveloperToolsDrawer() {
       </header>
       {activeTool && (
         <div className="developer-drawer__content" role="tabpanel">
-          {activeTool === 'calibration' ? <CalibrationTool /> : <GcodeConsolePanel />}
+          <ActiveTool tool={activeTool} />
         </div>
       )}
     </section>
