@@ -2,8 +2,32 @@ import cv2
 import numpy as np
 
 from tapbot.vision.detector import ColorButtonConfig, ColorButtonDetector
+from tapbot.vision.object_detection import (
+    ObjectBoundingBox,
+    ObjectDetection,
+)
 from tapbot.vision.pipeline import ScreenPipeline
 from tapbot.vision.screen import PhoneScreenDetector, PhoneScreenDetectorConfig
+
+
+class StubObjectDetector:
+    name = "ultralytics:test-phone.pt"
+
+    def __init__(self, *detections: ObjectDetection) -> None:
+        self.detections = detections
+
+    def detect(self, _frame: np.ndarray) -> tuple[ObjectDetection, ...]:
+        return self.detections
+
+
+def phone_object() -> ObjectDetection:
+    return ObjectDetection(
+        label="cell phone",
+        confidence=0.92,
+        bbox=ObjectBoundingBox(190, 10, 340, 570),
+        class_id=67,
+        source="ultralytics:test-phone.pt",
+    )
 
 
 def physical_like_frame() -> np.ndarray:
@@ -28,7 +52,8 @@ def test_physical_like_pipeline_runs_every_stage() -> None:
             config=PhoneScreenDetectorConfig(
                 canonical_width=200,
                 canonical_height=400,
-            )
+            ),
+            object_detector=StubObjectDetector(phone_object()),
         ),
         [ui_detector()],
         event_recorder=lambda event_type, _payload: events.append(event_type),
@@ -39,7 +64,7 @@ def test_physical_like_pipeline_runs_every_stage() -> None:
     assert result.succeeded
     assert result.frame_id == 123
     assert result.phone_detection.found
-    assert result.phone_detection.source == "contour"
+    assert result.phone_detection.source == "yolo+contour"
     assert result.canonical_image is not None
     assert result.canonical_image.shape == (400, 200, 3)
     assert result.detections[0].label == "green_button"
@@ -60,7 +85,7 @@ def test_already_canonical_pipeline_skips_phone_and_transform() -> None:
     canonical = np.full((120, 200, 3), 30, dtype=np.uint8)
     canonical[40:80, 60:150] = (0, 255, 0)
     pipeline = ScreenPipeline(
-        PhoneScreenDetector(),
+        PhoneScreenDetector(object_detector=StubObjectDetector()),
         [ui_detector()],
         already_canonical=True,
     )
@@ -81,7 +106,7 @@ def test_already_canonical_pipeline_skips_phone_and_transform() -> None:
 def test_no_phone_stops_before_canonical_and_ui_detection() -> None:
     events: list[str] = []
     pipeline = ScreenPipeline(
-        PhoneScreenDetector(),
+        PhoneScreenDetector(object_detector=StubObjectDetector()),
         [ui_detector()],
         event_recorder=lambda event_type, _payload: events.append(event_type),
     )

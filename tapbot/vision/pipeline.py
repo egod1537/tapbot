@@ -28,6 +28,8 @@ class ScreenPipelineTimings:
     canonical_transform_ms: float
     ui_detection_ms: float
     total_ms: float
+    object_detection_ms: float = 0.0
+    screen_refinement_ms: float = 0.0
 
     def to_dict(self) -> dict[str, float]:
         return {
@@ -35,6 +37,8 @@ class ScreenPipelineTimings:
             "canonical_transform_ms": self.canonical_transform_ms,
             "ui_detection_ms": self.ui_detection_ms,
             "total_ms": self.total_ms,
+            "object_detection_ms": self.object_detection_ms,
+            "screen_refinement_ms": self.screen_refinement_ms,
         }
 
 
@@ -181,6 +185,14 @@ class ScreenPipeline:
                 "skipped": self.already_canonical,
                 "status": "success" if phone_detection.found else "warning",
                 "latency_ms": phone_detection_ms,
+                "object_detection_ms": self._debug_timing(
+                    phone_detection,
+                    "object_detection_ms",
+                ),
+                "screen_refinement_ms": self._debug_timing(
+                    phone_detection,
+                    "screen_refinement_ms",
+                ),
             },
         )
         if not phone_detection.found:
@@ -269,6 +281,8 @@ class ScreenPipeline:
                 canonical_transform_ms,
                 ui_detection_ms,
                 total_ms,
+                self._debug_timing(phone_detection, "object_detection_ms"),
+                self._debug_timing(phone_detection, "screen_refinement_ms"),
             ),
             already_canonical=self.already_canonical,
         )
@@ -309,6 +323,8 @@ class ScreenPipeline:
                 canonical_transform_ms,
                 ui_detection_ms,
                 total_ms,
+                self._debug_timing(phone_detection, "object_detection_ms"),
+                self._debug_timing(phone_detection, "screen_refinement_ms"),
             ),
             already_canonical=self.already_canonical,
             failure_stage=stage,
@@ -326,6 +342,11 @@ class ScreenPipeline:
 
     def _elapsed_ms(self, started: float) -> float:
         return max(0.0, (self._clock() - started) * 1000)
+
+    @staticmethod
+    def _debug_timing(detection: PhoneScreenDetection, name: str) -> float:
+        value = detection.debug_metadata.get(name, 0.0)
+        return float(value) if isinstance(value, int | float) else 0.0
 
     def _emit(self, event_type: str, payload: Mapping[str, object]) -> None:
         if self._event_recorder is not None:

@@ -11,3 +11,4 @@ frontend/.env.local
 frontend/.env.*.local
 /simulation-trace.json
 /replay-trace.json
+*.pt

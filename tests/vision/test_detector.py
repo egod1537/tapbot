@@ -20,6 +20,13 @@ from tapbot.vision.screen import PhoneScreenDetector
 FIXTURE = Path(__file__).parent / "fixtures" / "green_button.ppm"
 
 
+class EmptyObjectDetector:
+    name = "stub:no-phone"
+
+    def detect(self, _frame: np.ndarray) -> tuple[object, ...]:
+        return ()
+
+
 def identity_calibration(width: int, height: int) -> Calibration:
     return Calibration(
         profile_name="vision-test",
@@ -111,7 +118,7 @@ def test_pipeline_rectifies_before_detection() -> None:
         robot_work_area=RobotWorkArea(0, 300, 0, 200),
     )
     pipeline = VisionPipeline(
-        PhoneScreenDetector(calibration),
+        PhoneScreenDetector(calibration, object_detector=EmptyObjectDetector()),
         [ColorButtonDetector(ColorButtonConfig(min_area=100))],
     )
 

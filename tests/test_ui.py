@@ -22,6 +22,10 @@ from tapbot.robot.transport import MockTransport
 from tapbot.ui.app import WorkspaceBounds, create_app
 from tapbot.ui.services import EventLog, RobotCommandDispatcher
 from tapbot.vision.calibration import CalibrationStore
+from tapbot.vision.object_detection import (
+    ObjectBoundingBox,
+    ObjectDetection,
+)
 
 
 class FakeCamera:
@@ -399,6 +403,27 @@ class PhoneScreenCamera(FakeCamera):
         cv2.polylines(self.frame, [phone], True, (5, 5, 5), 7)
 
 
+class FixtureObjectDetector:
+    name = "ultralytics:fixture-phone.pt"
+
+    def detect(self, frame: np.ndarray) -> tuple[ObjectDetection, ...]:
+        if frame.shape[:2] == (360, 480):
+            bbox = ObjectBoundingBox(140, 0, 220, 360)
+        elif frame.shape[:2] == (80, 120):
+            bbox = ObjectBoundingBox(0, 0, 20, 20)
+        else:
+            return ()
+        return (
+            ObjectDetection(
+                label="cell phone",
+                confidence=0.93,
+                bbox=bbox,
+                class_id=67,
+                source=self.name,
+            ),
+        )
+
+
 def test_phone_screen_api_creates_canonical_and_raw_overlay(
     tmp_path: Path,
 ) -> None:
@@ -406,6 +431,7 @@ def test_phone_screen_api_creates_canonical_and_raw_overlay(
         camera=PhoneScreenCamera(),
         camera_fps=30,
         calibration_store=CalibrationStore(tmp_path / "calibrations.json"),
+        phone_object_detector=FixtureObjectDetector(),
     )
 
     with TestClient(app) as client:
@@ -437,7 +463,16 @@ def test_phone_screen_api_creates_canonical_and_raw_overlay(
 
     assert response.status_code == 200
     assert body["found"] is True
-    assert body["source"] == "contour"
+    assert body["source"] == "yolo+contour"
+    assert body["detector_backend"] == "yolo"
+    assert body["phone_bbox_confidence"] == 0.93
+    assert body["phone_bbox"] == {
+        "x": 140,
+        "y": 0,
+        "width": 220,
+        "height": 360,
+    }
+    assert body["debug_metadata"]["refinement_candidate_count"] >= 1
     assert body["frame"]["frame_id"] == body["frame_id"]
     assert body["phone_detection_result_id"] > 0
     assert body["canonical_result_id"] > 0
@@ -473,6 +508,7 @@ def test_phone_screen_api_reports_no_candidate_without_calibration(
         camera=FakeCamera(),
         camera_fps=30,
         calibration_store=CalibrationStore(tmp_path / "calibrations.json"),
+        phone_object_detector=FixtureObjectDetector(),
     )
 
     with TestClient(app) as client:
@@ -492,6 +528,7 @@ def test_screen_pipeline_api_returns_one_synchronized_physical_result(
         camera=PhoneScreenCamera(),
         camera_fps=30,
         calibration_store=CalibrationStore(tmp_path / "calibrations.json"),
+        phone_object_detector=FixtureObjectDetector(),
     )
 
     with TestClient(app) as client:
@@ -524,7 +561,9 @@ def test_screen_pipeline_api_returns_one_synchronized_physical_result(
     assert body["frame"]["source_id"] == "fake-camera"
     assert body["already_canonical"] is False
     assert body["phone_detection"]["found"] is True
-    assert body["phone_detection"]["source"] == "contour"
+    assert body["phone_detection"]["source"] == "yolo+contour"
+    assert body["phone_detection"]["detector_backend"] == "yolo"
+    assert body["phone_detection"]["phone_bbox_confidence"] == 0.93
     assert body["canonical"]["width"] == 140
     assert body["canonical"]["height"] == 300
     assert body["canonical"]["transform_skipped"] is False
@@ -532,6 +571,8 @@ def test_screen_pipeline_api_returns_one_synchronized_physical_result(
     assert body["failure_stage"] is None
     assert body["error"] is None
     assert all(value >= 0 for value in body["timings"].values())
+    assert "object_detection_ms" in body["timings"]
+    assert "screen_refinement_ms" in body["timings"]
     assert raw.headers["content-type"] == "image/jpeg"
     assert canonical.headers["content-type"] == "image/jpeg"
     assert overlay.headers["content-type"] == "image/jpeg"
@@ -579,6 +620,7 @@ def test_screen_pipeline_api_stops_when_phone_is_missing(tmp_path: Path) -> None
         camera=FakeCamera(),
         camera_fps=30,
         calibration_store=CalibrationStore(tmp_path / "calibrations.json"),
+        phone_object_detector=FixtureObjectDetector(),
     )
 
     with TestClient(app) as client:
@@ -603,6 +645,7 @@ def test_vision_detections_and_debug_overlay_are_available_in_ui(
         camera=GreenButtonCamera(),
         camera_fps=20,
         calibration_store=CalibrationStore(tmp_path / "calibrations.json"),
+        phone_object_detector=FixtureObjectDetector(),
     )
     payload = {
         "profile_name": "vision-ui-test",
@@ -646,6 +689,7 @@ def test_vision_saved_frame_can_be_filtered_and_replayed(tmp_path: Path) -> None
         camera=GreenButtonCamera(),
         camera_fps=20,
         calibration_store=CalibrationStore(tmp_path / "calibrations.json"),
+        phone_object_detector=FixtureObjectDetector(),
     )
     calibration = {
         "profile_name": "vision-replay-test",
@@ -732,6 +776,7 @@ def test_model_debug_traces_decision_gates_without_executing_robot(
         camera_fps=20,
         calibration_store=CalibrationStore(tmp_path / "calibrations.json"),
         model_client=model,
+        phone_object_detector=FixtureObjectDetector(),
     )
     calibration = {
         "profile_name": "model-debug-test",
@@ -822,6 +867,7 @@ def test_model_debug_preserves_invalid_raw_response_and_blocks_action(
         camera_fps=20,
         calibration_store=CalibrationStore(tmp_path / "calibrations.json"),
         model_client=MockModelClient(invalid_response),
+        phone_object_detector=FixtureObjectDetector(),
     )
     calibration = {
         "profile_name": "invalid-model-debug-test",

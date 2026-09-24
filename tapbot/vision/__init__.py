@@ -53,6 +53,15 @@ if TYPE_CHECKING:
         ScreenPipelineResult,
         ScreenPipelineTimings,
     )
+    from tapbot.vision.object_detection import (
+        ObjectBoundingBox,
+        ObjectDetection,
+        ObjectDetectionError,
+        ObjectDetector,
+        YoloPhoneDetector,
+        YoloPhoneDetectorConfig,
+        default_phone_object_detector,
+    )
 
 __all__ = [
     "CameraError",
@@ -91,6 +100,13 @@ __all__ = [
     "ScreenPipeline",
     "ScreenPipelineResult",
     "ScreenPipelineTimings",
+    "ObjectBoundingBox",
+    "ObjectDetection",
+    "ObjectDetectionError",
+    "ObjectDetector",
+    "YoloPhoneDetector",
+    "YoloPhoneDetectorConfig",
+    "default_phone_object_detector",
     "VisionPipeline",
     "VisionResult",
     "draw_debug_overlay",
@@ -156,6 +172,19 @@ def __getattr__(name: str) -> Any:
         from tapbot.vision import pipeline
 
         return getattr(pipeline, name)
+    object_detection_exports = {
+        "ObjectBoundingBox",
+        "ObjectDetection",
+        "ObjectDetectionError",
+        "ObjectDetector",
+        "YoloPhoneDetector",
+        "YoloPhoneDetectorConfig",
+        "default_phone_object_detector",
+    }
+    if name in object_detection_exports:
+        from tapbot.vision import object_detection
+
+        return getattr(object_detection, name)
     if name in __all__:
         from tapbot.vision import detector
 

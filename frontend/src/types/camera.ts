@@ -8,6 +8,7 @@ interface OverlayBase {
   label?: string
   confidence?: number
   color?: string
+  dashed?: boolean
 }
 
 export interface ScreenCornersOverlay extends OverlayBase {

@@ -78,6 +78,11 @@ from tapbot.vision.screen import (
     draw_phone_screen_overlay,
 )
 from tapbot.vision.pipeline import ScreenPipeline
+from tapbot.vision.object_detection import (
+    ObjectDetector,
+    bbox_fallback_enabled,
+    default_phone_object_detector,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -164,6 +169,7 @@ def create_app(
     camera_fps: float = 20.0,
     calibration_store: CalibrationStore | None = None,
     vision_detectors: Sequence[Detector] | None = None,
+    phone_object_detector: ObjectDetector | None = None,
     model_client: ModelClient | None = None,
     decision_policy: DecisionPolicy | None = None,
 ) -> FastAPI:
@@ -211,6 +217,22 @@ def create_app(
     camera_worker = CameraFrameWorker(camera, event_log, fps=camera_fps)
     calibration_store = calibration_store or CalibrationStore("tapbot-calibrations.json")
     vision_detectors = tuple(vision_detectors or (ColorButtonDetector(),))
+    if phone_object_detector is None:
+        phone_object_detector = default_phone_object_detector()
+
+    def create_phone_detector(
+        calibration: Calibration | None,
+        config: PhoneScreenDetectorConfig | None = None,
+    ) -> PhoneScreenDetector:
+        return PhoneScreenDetector(
+            calibration,
+            config=(
+                PhoneScreenDetectorConfig(bbox_fallback=bbox_fallback_enabled())
+                if config is None
+                else config
+            ),
+            object_detector=phone_object_detector,
+        )
     model_client = model_client or MockModelClient(
         {
             "state": "debug_idle",
@@ -1138,12 +1160,10 @@ def create_app(
             detector_config = PhoneScreenDetectorConfig(
                 canonical_width=payload.canonical_width,
                 canonical_height=payload.canonical_height,
+                bbox_fallback=bbox_fallback_enabled(),
             )
             pipeline = ScreenPipeline(
-                PhoneScreenDetector(
-                    fallback_calibration,
-                    config=detector_config,
-                ),
+                create_phone_detector(fallback_calibration, detector_config),
                 selected_detectors,
                 already_canonical=bool(
                     snapshot.source_metadata.get("already_canonical", False)
@@ -1184,7 +1204,10 @@ def create_app(
             "error": pipeline_result.error,
         }
 
-        if pipeline_result.phone_detection.found:
+        if (
+            pipeline_result.phone_detection.found
+            or pipeline_result.phone_detection.phone_bbox is not None
+        ):
             overlay = await asyncio.to_thread(
                 draw_phone_screen_overlay,
                 frame,
@@ -1293,8 +1316,9 @@ def create_app(
             config = PhoneScreenDetectorConfig(
                 canonical_width=payload.canonical_width,
                 canonical_height=payload.canonical_height,
+                bbox_fallback=bbox_fallback_enabled(),
             )
-            detector = PhoneScreenDetector(fallback_calibration, config=config)
+            detector = create_phone_detector(fallback_calibration, config)
             started_at = perf_counter()
             result = await asyncio.to_thread(detector.process, frame)
         except (CalibrationError, PhoneScreenDetectionError, ValueError, cv2.error) as error:
@@ -1323,6 +1347,22 @@ def create_app(
             }
         )
         if result.canonical_image is None:
+            if result.detection.phone_bbox is not None:
+                overlay = await asyncio.to_thread(
+                    draw_phone_screen_overlay,
+                    frame,
+                    result.detection,
+                )
+                overlay_success, overlay_encoded = await asyncio.to_thread(
+                    cv2.imencode,
+                    ".jpg",
+                    overlay,
+                )
+                if overlay_success:
+                    with phone_screen_result_lock:
+                        phone_screen_overlay_images[phone_detection_result_id] = (
+                            overlay_encoded.tobytes()
+                        )
             event_log.add(
                 "Phone screen candidate not found",
                 level="warning",
@@ -1458,7 +1498,7 @@ def create_app(
         with calibration_lock:
             calibration = active_calibration
         pipeline = VisionPipeline(
-            PhoneScreenDetector(calibration),
+            create_phone_detector(calibration),
             selected_detectors,
         )
 
@@ -1660,7 +1700,7 @@ def create_app(
             raise HTTPException(status_code=404, detail="Saved model frame not found")
         calibration = current_calibration()
         pipeline = VisionPipeline(
-            PhoneScreenDetector(calibration),
+            create_phone_detector(calibration),
             vision_detectors,
         )
         vision_started_at = perf_counter()
@@ -1864,7 +1904,7 @@ def create_app(
         with calibration_lock:
             calibration = active_calibration
         pipeline = VisionPipeline(
-            PhoneScreenDetector(calibration),
+            create_phone_detector(calibration),
             vision_detectors,
         )
         try:

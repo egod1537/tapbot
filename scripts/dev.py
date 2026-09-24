@@ -16,7 +16,14 @@ import time
 
 ROOT = Path(__file__).resolve().parents[1]
 FRONTEND = ROOT / "frontend"
-BACKEND_IMPORTS = ("fastapi", "numpy", "cv2", "serial", "uvicorn")
+BACKEND_IMPORTS = (
+    "fastapi",
+    "numpy",
+    "cv2",
+    "serial",
+    "ultralytics",
+    "uvicorn",
+)
 
 
 def parse_args() -> argparse.Namespace:

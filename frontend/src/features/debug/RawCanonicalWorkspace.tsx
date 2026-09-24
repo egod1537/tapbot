@@ -29,29 +29,33 @@ interface RawCanonicalWorkspaceProps {
 function phoneOverlay(workspace: RawCanonicalController): CameraOverlayFrame | null {
   const pipelineResult = workspace.result
   const result = pipelineResult?.phone_detection
-  if (!pipelineResult || !result?.found || !result.corners) return null
-  const points = [
-    result.corners.tl,
-    result.corners.tr,
-    result.corners.br,
-    result.corners.bl,
-  ] as const
-  const items: CameraOverlayItem[] = [
-    {
+  if (!pipelineResult || !result) return null
+  const items: CameraOverlayItem[] = []
+  if (result.phone_bbox) {
+    items.push({
+      id: `yolo-phone-bbox-${result.result_id.toString()}`,
+      kind: 'bbox',
+      ...result.phone_bbox,
+      label: 'YOLO phone',
+      confidence: result.phone_bbox_confidence ?? undefined,
+      color: '#8abbff',
+      dashed: true,
+    })
+  }
+  if (result.found && result.corners) {
+    const points = [
+      result.corners.tl,
+      result.corners.tr,
+      result.corners.br,
+      result.corners.bl,
+    ] as const
+    items.push({
       id: `phone-${result.result_id.toString()}`,
       kind: 'screen-corners',
       points: [...points],
-      label: 'phone screen',
+      label: 'refined screen',
       confidence: result.confidence,
       color: '#f0b429',
-    },
-  ]
-  if (result.bbox) {
-    items.push({
-      id: `phone-bbox-${result.result_id.toString()}`,
-      kind: 'bbox',
-      ...result.bbox,
-      color: '#8abbff',
     })
   }
   if (result.center) {
@@ -62,6 +66,7 @@ function phoneOverlay(workspace: RawCanonicalController): CameraOverlayFrame | n
       color: '#ff7373',
     })
   }
+  if (items.length === 0) return null
   return {
     frameId: pipelineResult.frame_id,
     frameWidth: pipelineResult.frame.width,
@@ -141,7 +146,9 @@ export function RawCanonicalWorkspace({
           )}
           {result && (
             <Tag minimal>
-              Phone {result.timings.phone_detection_ms.toFixed(1)} ms · Transform{' '}
+              YOLO {result.timings.object_detection_ms.toFixed(1)} ms · Refine{' '}
+              {result.timings.screen_refinement_ms.toFixed(1)} ms · Phone{' '}
+              {result.timings.phone_detection_ms.toFixed(1)} ms · Transform{' '}
               {result.timings.canonical_transform_ms.toFixed(1)} ms · UI{' '}
               {result.timings.ui_detection_ms.toFixed(1)} ms · Total{' '}
               {result.timings.total_ms.toFixed(1)} ms
@@ -229,6 +236,12 @@ export function RawCanonicalWorkspace({
                         {(phone.confidence * 100).toFixed(1)}%
                       </Tag>
                     )}
+                    {phone?.phone_bbox_confidence !== null &&
+                      phone?.phone_bbox_confidence !== undefined && (
+                        <Tag intent="primary" minimal>
+                          YOLO {(phone.phone_bbox_confidence * 100).toFixed(1)}%
+                        </Tag>
+                      )}
                   </div>
                   {workspace.phoneStatus === 'running' && (
                     <div className="focused-stage-state focused-stage-state--overlay">

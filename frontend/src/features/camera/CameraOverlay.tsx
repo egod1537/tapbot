@@ -122,6 +122,9 @@ export function CameraOverlay({
                 fill={color}
                 fillOpacity={0.05}
                 stroke={color}
+                strokeDasharray={
+                  item.dashed ? `${strokeWidth * 5} ${strokeWidth * 3}` : undefined
+                }
                 strokeWidth={strokeWidth}
                 vectorEffect="non-scaling-stroke"
               />

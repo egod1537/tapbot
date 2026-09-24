@@ -86,7 +86,16 @@ export interface PhoneScreenDetection {
   corners: PhoneScreenCorners | null
   bbox: VisionBoundingBox | null
   center: VisionPoint | null
-  source: 'contour' | 'calibration' | 'already_canonical' | null
+  phone_bbox: VisionBoundingBox | null
+  phone_bbox_confidence: number | null
+  detector_backend: 'yolo' | 'contour' | null
+  source:
+    | 'yolo+contour'
+    | 'yolo+bbox-fallback'
+    | 'contour'
+    | 'calibration'
+    | 'already_canonical'
+    | null
   failure_reason: string | null
   debug_metadata: Record<string, unknown>
 }
@@ -119,6 +128,8 @@ export interface ScreenPipelineRunPayload {
 
 export interface ScreenPipelineTimings {
   phone_detection_ms: number
+  object_detection_ms: number
+  screen_refinement_ms: number
   canonical_transform_ms: number
   ui_detection_ms: number
   total_ms: number
