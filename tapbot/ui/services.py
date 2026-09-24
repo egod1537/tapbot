@@ -251,6 +251,8 @@ class CameraFrameSnapshot:
     width: int
     height: int
     jpeg: bytes
+    source_id: str | None = None
+    source_metadata: dict[str, object] = field(default_factory=dict)
 
 
 class CameraFrameWorker:
@@ -261,7 +263,7 @@ class CameraFrameWorker:
         camera: CameraSource,
         event_log: EventLog,
         *,
-        fps: float = 5.0,
+        fps: float = 20.0,
         encoder: Callable[[str, NDArray[np.uint8]], tuple[bool, NDArray[np.uint8]]] = cv2.imencode,
     ) -> None:
         if fps <= 0:
@@ -349,8 +351,34 @@ class CameraFrameWorker:
             )
             self._event_log.add(f"Camera opened: {source_id!r}")
             while not self._stop.is_set():
+                iteration_started = perf_counter()
                 try:
-                    frame = self.camera.read_frame()
+                    read_with_metadata = getattr(
+                        self.camera,
+                        "read_frame_with_metadata",
+                        None,
+                    )
+                    if callable(read_with_metadata):
+                        frame, frame_source_id, source_metadata = read_with_metadata()
+                    else:
+                        frame = self.camera.read_frame()
+                        frame_source_id = str(
+                            getattr(
+                                self.camera,
+                                "id",
+                                getattr(
+                                    self.camera,
+                                    "source",
+                                    type(self.camera).__name__,
+                                ),
+                            )
+                        )
+                        metadata_getter = getattr(self.camera, "get_metadata", None)
+                        source_metadata = (
+                            dict(metadata_getter())
+                            if callable(metadata_getter)
+                            else {}
+                        )
                     success, encoded = self._encoder(".jpg", frame)
                     if not success:
                         raise CameraError("Failed to encode camera frame as JPEG")
@@ -361,6 +389,8 @@ class CameraFrameWorker:
                         width=width,
                         height=height,
                         jpeg=encoded.tobytes(),
+                        source_id=frame_source_id,
+                        source_metadata=dict(source_metadata),
                     )
                     with self._lock:
                         self._frame = frame.copy()
@@ -378,6 +408,10 @@ class CameraFrameWorker:
                             "captured_at": snapshot.captured_at,
                             "width": width,
                             "height": height,
+                            "source_id": frame_source_id,
+                            "already_canonical": bool(
+                                source_metadata.get("already_canonical", False)
+                            ),
                         },
                     )
                 except CameraError as error:
@@ -391,7 +425,8 @@ class CameraFrameWorker:
                         status="error",
                         payload={"error": str(error)},
                     )
-                self._stop.wait(self._frame_interval)
+                elapsed = perf_counter() - iteration_started
+                self._stop.wait(max(0.0, self._frame_interval - elapsed))
         except CameraError as error:
             with self._lock:
                 self._error = str(error)

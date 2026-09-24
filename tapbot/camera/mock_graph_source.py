@@ -32,6 +32,7 @@ class MockGraphCameraSource(CameraSource):
         *,
         name: str | None = None,
         fps: float = 5.0,
+        already_canonical: bool = True,
         graph_path: str | Path | None = None,
         graph: MockScreenGraph | None = None,
         event_recorder: MockEventRecorder | None = None,
@@ -45,6 +46,7 @@ class MockGraphCameraSource(CameraSource):
         self.id = f"mock:{graph_id}"
         self.name = name or f"Mock Graph: {graph_id}"
         self.fps = fps
+        self.already_canonical = already_canonical
         self.graph_path = (
             Path(graph_path)
             if graph_path
@@ -97,6 +99,7 @@ class MockGraphCameraSource(CameraSource):
             graph_id=self.graph_id,
             graph_path=str(self.graph_path),
             current_state=current_state,
+            already_canonical=self.already_canonical,
         )
         return metadata
 

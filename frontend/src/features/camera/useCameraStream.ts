@@ -13,7 +13,7 @@ import {
   selectCameraSource,
 } from './camera-api'
 
-const FRAME_INTERVAL_MS = 250
+const FRAME_INTERVAL_MS = 50
 const FRAME_TIMEOUT_MS = 5_000
 const SOURCE_STATUS_INTERVAL_MS = 1_000
 

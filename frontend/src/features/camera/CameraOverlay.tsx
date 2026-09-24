@@ -74,16 +74,31 @@ export function CameraOverlay({
                   vectorEffect="non-scaling-stroke"
                 />
                 {item.points.map((point, index) => (
-                  <circle
-                    key={`${item.id}-${index.toString()}`}
-                    cx={point.x}
-                    cy={point.y}
-                    r={pointRadius}
-                    fill="#0a0e0c"
-                    stroke={color}
-                    strokeWidth={strokeWidth}
-                    vectorEffect="non-scaling-stroke"
-                  />
+                  <g key={`${item.id}-${index.toString()}`}>
+                    <circle
+                      cx={point.x}
+                      cy={point.y}
+                      r={pointRadius}
+                      fill="#0a0e0c"
+                      stroke={color}
+                      strokeWidth={strokeWidth}
+                      vectorEffect="non-scaling-stroke"
+                    />
+                    {showLabels && (
+                      <text
+                        x={point.x + pointRadius * 1.8}
+                        y={point.y - pointRadius * 1.8}
+                        fill={color}
+                        fontSize={fontSize}
+                        paintOrder="stroke"
+                        stroke="#0a0e0c"
+                        strokeWidth={strokeWidth * 2}
+                        vectorEffect="non-scaling-stroke"
+                      >
+                        {(['TL', 'TR', 'BR', 'BL'] as const)[index]}
+                      </text>
+                    )}
+                  </g>
                 ))}
               </>
             )}

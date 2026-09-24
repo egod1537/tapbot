@@ -90,6 +90,83 @@ class RobotWorkArea:
 PointTuple: TypeAlias = tuple[Point2D, Point2D, Point2D, Point2D]
 
 
+def perspective_matrix(
+    source_points: PointTuple,
+    destination_points: PointTuple,
+    *,
+    name: str = "perspective",
+) -> NDArray[np.float64]:
+    """Build and validate a homography shared by calibration and vision."""
+
+    source = Calibration._points_array(source_points)
+    destination = Calibration._points_array(destination_points)
+    Calibration._validate_quadrilateral(f"{name} source", source)
+    Calibration._validate_quadrilateral(f"{name} destination", destination)
+    try:
+        matrix = cv2.getPerspectiveTransform(source, destination)
+    except cv2.error as error:
+        raise CoordinateTransformError(f"Could not calculate {name} homography") from error
+    Calibration._validate_matrix(name, matrix)
+    return matrix
+
+
+def warp_quadrilateral(
+    frame: NDArray[np.uint8],
+    source_points: PointTuple,
+    width: int,
+    height: int,
+) -> NDArray[np.uint8]:
+    """Rectify a quadrilateral into a canonical BGR image."""
+
+    if (
+        not isinstance(frame, np.ndarray)
+        or frame.dtype != np.uint8
+        or frame.ndim != 3
+        or frame.shape[2] != 3
+        or frame.size == 0
+    ):
+        raise CalibrationError("frame must be a non-empty uint8 BGR image")
+    if isinstance(width, bool) or isinstance(height, bool) or width < 2 or height < 2:
+        raise CalibrationError("canonical size must be at least 2x2 pixels")
+    destination_points: PointTuple = (
+        Point2D(0, 0),
+        Point2D(width - 1, 0),
+        Point2D(width - 1, height - 1),
+        Point2D(0, height - 1),
+    )
+    matrix = perspective_matrix(
+        source_points,
+        destination_points,
+        name="camera-to-canonical",
+    )
+    return warp_perspective(frame, matrix, width, height)
+
+
+def warp_perspective(
+    frame: NDArray[np.uint8],
+    matrix: NDArray[np.float64],
+    width: int,
+    height: int,
+) -> NDArray[np.uint8]:
+    """Apply an already validated homography to a BGR image."""
+
+    if (
+        not isinstance(frame, np.ndarray)
+        or frame.dtype != np.uint8
+        or frame.ndim != 3
+        or frame.shape[2] != 3
+        or frame.size == 0
+    ):
+        raise CalibrationError("frame must be a non-empty uint8 BGR image")
+    if isinstance(width, bool) or isinstance(height, bool) or width < 2 or height < 2:
+        raise CalibrationError("canonical size must be at least 2x2 pixels")
+    Calibration._validate_matrix("perspective", matrix)
+    try:
+        return cv2.warpPerspective(frame, matrix, (width, height))
+    except cv2.error as error:
+        raise CoordinateTransformError("Perspective transform failed") from error
+
+
 @dataclass(frozen=True, slots=True)
 class Calibration:
     """A four-corner mapping among camera, screen, and robot coordinates.
@@ -147,15 +224,20 @@ class Calibration:
                 raise CalibrationError("Robot reference point is outside the work area")
 
         camera = self._points_array(self.camera_corners)
-        screen = self._points_array(self.screen_corners)
         robot = self._points_array(self.robot_points)
         self._validate_quadrilateral("camera_corners", camera)
         self._validate_quadrilateral("robot_points", robot)
 
-        camera_to_screen = cv2.getPerspectiveTransform(camera, screen)
-        screen_to_robot = cv2.getPerspectiveTransform(screen, robot)
-        self._validate_matrix("camera-to-screen", camera_to_screen)
-        self._validate_matrix("screen-to-robot", screen_to_robot)
+        camera_to_screen = perspective_matrix(
+            self.camera_corners,
+            self.screen_corners,
+            name="camera-to-screen",
+        )
+        screen_to_robot = perspective_matrix(
+            self.screen_corners,
+            self.robot_points,
+            name="screen-to-robot",
+        )
         object.__setattr__(self, "_camera_to_screen_matrix", camera_to_screen)
         object.__setattr__(
             self,

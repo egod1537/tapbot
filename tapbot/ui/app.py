@@ -71,7 +71,13 @@ from tapbot.vision.detector import (
     VisionResult,
     draw_debug_overlay,
 )
-from tapbot.vision.screen import PhoneScreenDetector
+from tapbot.vision.screen import (
+    PhoneScreenDetectionError,
+    PhoneScreenDetector,
+    PhoneScreenDetectorConfig,
+    draw_phone_screen_overlay,
+)
+from tapbot.vision.pipeline import ScreenPipeline
 
 
 @dataclass(frozen=True, slots=True)
@@ -123,6 +129,24 @@ class VisionRunRequest:
 
 
 @dataclass(frozen=True, slots=True)
+class PhoneScreenRunRequest:
+    frame_id: int | None = None
+    canonical_width: int | None = None
+    canonical_height: int | None = None
+    use_calibration_fallback: bool = True
+
+
+@dataclass(frozen=True, slots=True)
+class ScreenPipelineRunRequest:
+    frame_id: int | None = None
+    detector_types: list[str] | None = None
+    confidence_threshold: float = 0.0
+    canonical_width: int | None = None
+    canonical_height: int | None = None
+    use_calibration_fallback: bool = True
+
+
+@dataclass(frozen=True, slots=True)
 class ModelRunRequest:
     frame_id: int | None = None
     context: dict[str, object] | None = None
@@ -137,7 +161,7 @@ def create_app(
     camera: CameraSource | None = None,
     camera_manager: CameraManager | None = None,
     bounds: WorkspaceBounds | None = None,
-    camera_fps: float = 5.0,
+    camera_fps: float = 20.0,
     calibration_store: CalibrationStore | None = None,
     vision_detectors: Sequence[Detector] | None = None,
     model_client: ModelClient | None = None,
@@ -202,11 +226,16 @@ def create_app(
     gcode_console_lock = Lock()
     vision_frame_lock = Lock()
     vision_result_lock = Lock()
+    phone_screen_result_lock = Lock()
     model_debug_lock = Lock()
     model_result_lock = Lock()
     saved_vision_frames: dict[int, CameraFrameSnapshot] = {}
     vision_result_images: dict[int, bytes] = {}
     vision_result_ids = count(1)
+    phone_screen_canonical_images: dict[int, bytes] = {}
+    phone_screen_overlay_images: dict[int, bytes] = {}
+    phone_detection_result_ids = count(1)
+    canonical_result_ids = count(1)
     model_input_images: dict[int, bytes] = {}
     model_result_ids = count(1)
     operation_trace_ids = count(1)
@@ -959,12 +988,46 @@ def create_app(
             "name": type(detector).__name__,
         }
 
+    def screen_pipeline_event(
+        event_type: str,
+        payload: Mapping[str, object],
+    ) -> None:
+        status = str(payload.get("status", "info"))
+        latency_value = payload.get("latency_ms")
+        latency_ms = (
+            float(latency_value)
+            if isinstance(latency_value, (int, float))
+            else None
+        )
+        messages = {
+            "screen.frame": "Screen pipeline frame captured",
+            "screen.phone_detect.start": "Phone screen detection started",
+            "screen.phone_detect.result": "Phone screen detection completed",
+            "screen.canonical.ready": "Canonical screen ready",
+            "screen.ui_detect.result": "Canonical UI detection completed",
+            "screen.pipeline.error": "Screen pipeline failed",
+        }
+        event_log.add(
+            messages.get(event_type, event_type),
+            level="error" if status == "error" else "info",
+            event_type=event_type,
+            category="vision",
+            status=status,
+            trace_id=f"frame-{payload.get('frame_id', 'unknown')}",
+            latency_ms=latency_ms,
+            payload=payload,
+        )
+
     def vision_frame_metadata(snapshot: CameraFrameSnapshot) -> dict[str, object]:
         return {
             "frame_id": snapshot.frame_id,
             "captured_at": snapshot.captured_at,
             "width": snapshot.width,
             "height": snapshot.height,
+            "source_id": snapshot.source_id,
+            "already_canonical": bool(
+                snapshot.source_metadata.get("already_canonical", False)
+            ),
         }
 
     def remember_vision_frame(snapshot: CameraFrameSnapshot) -> None:
@@ -1018,6 +1081,342 @@ def create_app(
             headers={"Cache-Control": "no-store"},
         )
 
+    @application.post("/api/vision/screen-pipeline/run")
+    async def run_screen_pipeline(
+        payload: ScreenPipelineRunRequest,
+    ) -> dict[str, object]:
+        if (
+            not math.isfinite(payload.confidence_threshold)
+            or not 0 <= payload.confidence_threshold <= 1
+        ):
+            raise HTTPException(
+                status_code=422,
+                detail="confidence_threshold must be between 0 and 1",
+            )
+        if payload.frame_id is None:
+            snapshot = camera_worker.freeze_latest_frame()
+            if snapshot is None:
+                raise HTTPException(
+                    status_code=503,
+                    detail=camera_worker.error or "Camera frame is not available yet",
+                )
+            remember_vision_frame(snapshot)
+        else:
+            with vision_frame_lock:
+                snapshot = saved_vision_frames.get(payload.frame_id)
+            if snapshot is None:
+                raise HTTPException(status_code=404, detail="stale_frame")
+        frame = camera_worker.frozen_bgr_frame(snapshot.frame_id)
+        if frame is None:
+            raise HTTPException(status_code=404, detail="stale_frame")
+
+        descriptors = [
+            (detector, detector_descriptor(detector)) for detector in vision_detectors
+        ]
+        available_types = {descriptor["type"] for _, descriptor in descriptors}
+        selected_types = (
+            available_types
+            if payload.detector_types is None
+            else set(payload.detector_types)
+        )
+        unknown_types = selected_types - available_types
+        if unknown_types:
+            raise HTTPException(
+                status_code=422,
+                detail=f"Unknown detector types: {', '.join(sorted(unknown_types))}",
+            )
+        selected_detectors = [
+            detector
+            for detector, descriptor in descriptors
+            if descriptor["type"] in selected_types
+        ]
+        with calibration_lock:
+            fallback_calibration = (
+                active_calibration if payload.use_calibration_fallback else None
+            )
+        try:
+            detector_config = PhoneScreenDetectorConfig(
+                canonical_width=payload.canonical_width,
+                canonical_height=payload.canonical_height,
+            )
+            pipeline = ScreenPipeline(
+                PhoneScreenDetector(
+                    fallback_calibration,
+                    config=detector_config,
+                ),
+                selected_detectors,
+                already_canonical=bool(
+                    snapshot.source_metadata.get("already_canonical", False)
+                ),
+                event_recorder=screen_pipeline_event,
+            )
+            pipeline_result = await asyncio.to_thread(
+                pipeline.run,
+                frame,
+                frame_id=snapshot.frame_id,
+            )
+        except (CalibrationError, PhoneScreenDetectionError, ValueError, cv2.error) as error:
+            screen_pipeline_event(
+                "screen.pipeline.error",
+                {
+                    "frame_id": snapshot.frame_id,
+                    "stage": "pipeline_setup",
+                    "error": str(error),
+                    "status": "error",
+                },
+            )
+            raise HTTPException(status_code=422, detail=str(error)) from error
+
+        phone_detection_result_id = next(phone_detection_result_ids)
+        phone_detection = pipeline_result.phone_detection.geometry_dict()
+        phone_detection["result_id"] = phone_detection_result_id
+        response: dict[str, object] = {
+            "frame_id": snapshot.frame_id,
+            "frame": vision_frame_metadata(snapshot),
+            "phone_detection": phone_detection,
+            "canonical": None,
+            "detections": [],
+            "detector_types": sorted(selected_types),
+            "confidence_threshold": payload.confidence_threshold,
+            "timings": pipeline_result.timings.to_dict(),
+            "already_canonical": pipeline_result.already_canonical,
+            "failure_stage": pipeline_result.failure_stage,
+            "error": pipeline_result.error,
+        }
+
+        if pipeline_result.phone_detection.found:
+            overlay = await asyncio.to_thread(
+                draw_phone_screen_overlay,
+                frame,
+                pipeline_result.phone_detection,
+            )
+            overlay_success, overlay_encoded = await asyncio.to_thread(
+                cv2.imencode,
+                ".jpg",
+                overlay,
+            )
+            if overlay_success:
+                with phone_screen_result_lock:
+                    phone_screen_overlay_images[phone_detection_result_id] = (
+                        overlay_encoded.tobytes()
+                    )
+                    while len(phone_screen_overlay_images) > 12:
+                        oldest_detection_id = next(iter(phone_screen_overlay_images))
+                        del phone_screen_overlay_images[oldest_detection_id]
+
+        canonical_image = pipeline_result.canonical_image
+        if canonical_image is None:
+            return response
+        canonical_success, canonical_encoded = await asyncio.to_thread(
+            cv2.imencode,
+            ".jpg",
+            canonical_image,
+        )
+        if not canonical_success:
+            screen_pipeline_event(
+                "screen.pipeline.error",
+                {
+                    "frame_id": snapshot.frame_id,
+                    "stage": "canonical_transform",
+                    "error": "Could not encode canonical image",
+                    "status": "error",
+                },
+            )
+            raise HTTPException(status_code=500, detail="transform_failed")
+        canonical_result_id = next(canonical_result_ids)
+        with phone_screen_result_lock:
+            phone_screen_canonical_images[canonical_result_id] = (
+                canonical_encoded.tobytes()
+            )
+            while len(phone_screen_canonical_images) > 12:
+                oldest_result_id = next(iter(phone_screen_canonical_images))
+                del phone_screen_canonical_images[oldest_result_id]
+
+        detector_names = {
+            descriptor["type"]: descriptor["name"] for _, descriptor in descriptors
+        }
+        filtered_detections = tuple(
+            detection
+            for detection in pipeline_result.detections
+            if detection.confidence >= payload.confidence_threshold
+        )
+        detection_values: list[dict[str, object]] = []
+        for index, detection in enumerate(filtered_detections, start=1):
+            value = detection.to_dict()
+            value.update(
+                {
+                    "id": (
+                        f"screen-{canonical_result_id}-detection-{index}"
+                    ),
+                    "detector_name": detector_names.get(
+                        detection.detector_type,
+                        detection.detector_type,
+                    ),
+                }
+            )
+            detection_values.append(value)
+        response["canonical"] = {
+            "result_id": canonical_result_id,
+            "width": pipeline_result.canonical_width,
+            "height": pipeline_result.canonical_height,
+            "transform_skipped": pipeline_result.already_canonical,
+        }
+        response["detections"] = detection_values
+        return response
+
+    @application.post("/api/vision/phone-screen/run")
+    async def run_phone_screen_detection(
+        payload: PhoneScreenRunRequest,
+    ) -> dict[str, object]:
+        if payload.frame_id is None:
+            snapshot = camera_worker.freeze_latest_frame()
+            if snapshot is None:
+                raise HTTPException(
+                    status_code=503,
+                    detail=camera_worker.error or "Camera frame is not available yet",
+                )
+            remember_vision_frame(snapshot)
+        else:
+            with vision_frame_lock:
+                snapshot = saved_vision_frames.get(payload.frame_id)
+            if snapshot is None:
+                raise HTTPException(status_code=404, detail="stale_frame")
+        frame = camera_worker.frozen_bgr_frame(snapshot.frame_id)
+        if frame is None:
+            raise HTTPException(status_code=404, detail="stale_frame")
+
+        with calibration_lock:
+            fallback_calibration = (
+                active_calibration if payload.use_calibration_fallback else None
+            )
+        try:
+            config = PhoneScreenDetectorConfig(
+                canonical_width=payload.canonical_width,
+                canonical_height=payload.canonical_height,
+            )
+            detector = PhoneScreenDetector(fallback_calibration, config=config)
+            started_at = perf_counter()
+            result = await asyncio.to_thread(detector.process, frame)
+        except (CalibrationError, PhoneScreenDetectionError, ValueError, cv2.error) as error:
+            event_log.add(
+                f"Phone screen detection error: {error}",
+                level="error",
+                event_type="vision.phone_screen.error",
+                category="vision",
+                status="error",
+                trace_id=f"frame-{snapshot.frame_id}",
+                payload={"frame_id": snapshot.frame_id, "error": str(error)},
+            )
+            raise HTTPException(status_code=422, detail=str(error)) from error
+
+        response = result.detection.geometry_dict()
+        phone_detection_result_id = next(phone_detection_result_ids)
+        response.update(
+            {
+                "frame_id": snapshot.frame_id,
+                "frame": vision_frame_metadata(snapshot),
+                "phone_detection_result_id": phone_detection_result_id,
+                "canonical_result_id": None,
+                "result_id": None,
+                "canonical": None,
+                "overlay": result.detection.overlay_metadata(),
+            }
+        )
+        if result.canonical_image is None:
+            event_log.add(
+                "Phone screen candidate not found",
+                level="warning",
+                event_type="vision.phone_screen.missing",
+                category="vision",
+                status="warning",
+                trace_id=f"frame-{snapshot.frame_id}",
+                latency_ms=(perf_counter() - started_at) * 1000,
+                payload={
+                    "frame_id": snapshot.frame_id,
+                    "failure_reason": result.detection.failure_reason,
+                },
+            )
+            return response
+
+        overlay = await asyncio.to_thread(
+            draw_phone_screen_overlay,
+            frame,
+            result.detection,
+        )
+        canonical_success, canonical_encoded = await asyncio.to_thread(
+            cv2.imencode,
+            ".jpg",
+            result.canonical_image,
+        )
+        overlay_success, overlay_encoded = await asyncio.to_thread(
+            cv2.imencode,
+            ".jpg",
+            overlay,
+        )
+        if not canonical_success or not overlay_success:
+            raise HTTPException(status_code=500, detail="transform_failed")
+        canonical_result_id = next(canonical_result_ids)
+        with phone_screen_result_lock:
+            phone_screen_canonical_images[canonical_result_id] = (
+                canonical_encoded.tobytes()
+            )
+            phone_screen_overlay_images[phone_detection_result_id] = (
+                overlay_encoded.tobytes()
+            )
+            while len(phone_screen_canonical_images) > 12:
+                oldest_result_id = next(iter(phone_screen_canonical_images))
+                del phone_screen_canonical_images[oldest_result_id]
+            while len(phone_screen_overlay_images) > 12:
+                oldest_detection_id = next(iter(phone_screen_overlay_images))
+                del phone_screen_overlay_images[oldest_detection_id]
+        response["canonical_result_id"] = canonical_result_id
+        response["result_id"] = canonical_result_id
+        response["canonical"] = {
+            "width": result.canonical_width,
+            "height": result.canonical_height,
+        }
+        event_log.add(
+            "Phone screen detected",
+            event_type="vision.phone_screen.detected",
+            category="vision",
+            status="success",
+            trace_id=f"frame-{snapshot.frame_id}",
+            latency_ms=(perf_counter() - started_at) * 1000,
+            payload={
+                "frame_id": snapshot.frame_id,
+                "phone_detection_result_id": phone_detection_result_id,
+                "canonical_result_id": canonical_result_id,
+                "confidence": result.detection.confidence,
+                "source": result.detection.source,
+                "canonical": response["canonical"],
+            },
+        )
+        return response
+
+    @application.get("/api/vision/canonical/{result_id}")
+    async def phone_screen_canonical(result_id: int) -> Response:
+        with phone_screen_result_lock:
+            jpeg = phone_screen_canonical_images.get(result_id)
+        if jpeg is None:
+            raise HTTPException(status_code=404, detail="Canonical result not found")
+        return Response(
+            content=jpeg,
+            media_type="image/jpeg",
+            headers={"Cache-Control": "no-store"},
+        )
+
+    @application.get("/api/vision/phone-screen/{result_id}/overlay")
+    async def phone_screen_overlay(result_id: int) -> Response:
+        with phone_screen_result_lock:
+            jpeg = phone_screen_overlay_images.get(result_id)
+        if jpeg is None:
+            raise HTTPException(status_code=404, detail="Phone screen overlay not found")
+        return Response(
+            content=jpeg,
+            media_type="image/jpeg",
+            headers={"Cache-Control": "no-store"},
+        )
+
     @application.post("/api/vision/run")
     async def run_vision(payload: VisionRunRequest) -> dict[str, object]:
         if (
@@ -1056,7 +1455,8 @@ def create_app(
             for detector, descriptor in descriptors
             if descriptor["type"] in selected_types
         ]
-        calibration = current_calibration()
+        with calibration_lock:
+            calibration = active_calibration
         pipeline = VisionPipeline(
             PhoneScreenDetector(calibration),
             selected_detectors,
@@ -1133,6 +1533,11 @@ def create_app(
             "detector_types": sorted(selected_types),
             "confidence_threshold": payload.confidence_threshold,
             "detections": detection_values,
+            "phone_screen": (
+                None
+                if result.phone_screen is None
+                else result.phone_screen.geometry_dict()
+            ),
         }
 
     @application.get("/api/vision/results/{result_id}/rectified")
@@ -1456,7 +1861,8 @@ def create_app(
                 status_code=503,
                 detail=camera_worker.error or "Camera frame is not available yet",
             )
-        calibration = current_calibration()
+        with calibration_lock:
+            calibration = active_calibration
         pipeline = VisionPipeline(
             PhoneScreenDetector(calibration),
             vision_detectors,
@@ -1643,7 +2049,7 @@ def main() -> None:
         default=4,
         help="highest OpenCV device index included in discovery (default: 4)",
     )
-    parser.add_argument("--camera-fps", type=float, default=5.0)
+    parser.add_argument("--camera-fps", type=float, default=20.0)
     parser.add_argument("--robot", choices=("mock", "grbl"), default="mock")
     parser.add_argument("--serial-port")
     parser.add_argument("--baud-rate", type=int, default=115200)

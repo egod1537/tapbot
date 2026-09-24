@@ -26,6 +26,9 @@ from tapbot.camera.source import (
 OpenCVInput: TypeAlias = int | str
 WINDOWS_CAMERA_BACKENDS = (cv2.CAP_MSMF, cv2.CAP_DSHOW)
 CAMERA_PROBE_READS = 3
+PREFERRED_CAMERA_WIDTH = 1280
+PREFERRED_CAMERA_HEIGHT = 720
+PREFERRED_CAMERA_FPS = 30.0
 
 
 class _CaptureHandle(Protocol):
@@ -93,6 +96,7 @@ def create_opencv_capture(source: OpenCVInput) -> object:
             if not capture.isOpened():
                 capture.release()
                 continue
+            _request_preferred_camera_mode(capture)
             for _ in range(CAMERA_PROBE_READS):
                 success, frame = capture.read()
                 if success and _is_usable_camera_frame(frame):
@@ -100,6 +104,23 @@ def create_opencv_capture(source: OpenCVInput) -> object:
             capture.release()
         return _UnavailableCapture()
     return cv2.VideoCapture(source)
+
+
+def _request_preferred_camera_mode(capture: object) -> None:
+    """Ask a physical camera for HD/30 FPS while allowing driver fallback.
+
+    OpenCV otherwise commonly accepts the Windows driver's conservative
+    640x480 default. ``VideoCapture.set`` is only a request: unsupported
+    devices keep the closest mode they can provide, which is exactly what we
+    want for cameras with lower capabilities.
+    """
+
+    setter = getattr(capture, "set", None)
+    if not callable(setter):
+        return
+    setter(cv2.CAP_PROP_FRAME_WIDTH, float(PREFERRED_CAMERA_WIDTH))
+    setter(cv2.CAP_PROP_FRAME_HEIGHT, float(PREFERRED_CAMERA_HEIGHT))
+    setter(cv2.CAP_PROP_FPS, PREFERRED_CAMERA_FPS)
 
 
 def _is_usable_camera_frame(frame: object) -> bool:

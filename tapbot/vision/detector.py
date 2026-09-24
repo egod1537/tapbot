@@ -13,7 +13,11 @@ import numpy as np
 from numpy.typing import NDArray
 
 from tapbot.vision.calibration import Point2D
-from tapbot.vision.screen import PhoneScreenDetector
+from tapbot.vision.screen import (
+    PhoneScreenDetection,
+    PhoneScreenDetector,
+    PhoneScreenNotFoundError,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -157,6 +161,7 @@ class ColorButtonDetector:
 class VisionResult:
     rectified_image: NDArray[np.uint8]
     detections: tuple[Detection, ...]
+    phone_screen: PhoneScreenDetection | None = None
 
 
 class VisionPipeline:
@@ -171,7 +176,12 @@ class VisionPipeline:
         self.detectors = tuple(detectors)
 
     def process(self, camera_frame: NDArray[np.uint8]) -> VisionResult:
-        rectified = self.screen_detector.extract(camera_frame)
+        screen_result = self.screen_detector.process(camera_frame)
+        rectified = screen_result.canonical_image
+        if rectified is None:
+            raise PhoneScreenNotFoundError(
+                screen_result.detection.failure_reason or "no_phone_candidate"
+            )
         detections = [
             detection
             for detector in self.detectors
@@ -185,7 +195,7 @@ class VisionPipeline:
                 item.label,
             )
         )
-        return VisionResult(rectified, tuple(detections))
+        return VisionResult(rectified, tuple(detections), screen_result.detection)
 
 
 def draw_debug_overlay(

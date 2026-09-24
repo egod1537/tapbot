@@ -42,6 +42,7 @@ class FakeCapture:
         self.height = height
         self.fps = fps
         self.released = False
+        self.requested_properties: list[tuple[int, float]] = []
 
     def isOpened(self) -> bool:  # noqa: N802
         return self.opened
@@ -59,6 +60,10 @@ class FakeCapture:
             cv2.CAP_PROP_FRAME_HEIGHT: self.height,
             cv2.CAP_PROP_FPS: self.fps,
         }.get(property_id, 0.0)
+
+    def set(self, property_id: int, value: float) -> bool:
+        self.requested_properties.append((property_id, value))
+        return True
 
 
 class FakeCameraSource(CameraSource):
@@ -310,10 +315,9 @@ def test_windows_physical_camera_uses_directshow(
     calls: list[tuple[object, ...]] = []
     black = np.zeros((4, 6, 3), dtype=np.uint8)
     frame = np.full((4, 6, 3), 100, dtype=np.uint8)
-    captures = [
-        FakeCapture([(True, black), (True, black), (True, black)]),
-        FakeCapture([(True, frame)]),
-    ]
+    msmf_capture = FakeCapture([(True, black), (True, black), (True, black)])
+    directshow_capture = FakeCapture([(True, frame)])
+    captures = [msmf_capture, directshow_capture]
     monkeypatch.setattr(opencv_source_module.sys, "platform", "win32")
     monkeypatch.setattr(
         opencv_source_module.cv2,
@@ -326,6 +330,13 @@ def test_windows_physical_camera_uses_directshow(
     assert result.isOpened()  # type: ignore[attr-defined]
     assert result.read() == (True, frame)  # type: ignore[attr-defined]
     assert calls == [(0, cv2.CAP_MSMF), (0, cv2.CAP_DSHOW)]
+    expected_mode = [
+        (cv2.CAP_PROP_FRAME_WIDTH, 1280.0),
+        (cv2.CAP_PROP_FRAME_HEIGHT, 720.0),
+        (cv2.CAP_PROP_FPS, 30.0),
+    ]
+    assert msmf_capture.requested_properties == expected_mode
+    assert directshow_capture.requested_properties == expected_mode
 
 
 def test_windows_camera_rejects_opened_capture_without_usable_frame(

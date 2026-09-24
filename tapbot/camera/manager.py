@@ -265,6 +265,7 @@ class CameraManager(CameraSource):
         *,
         name: str | None = None,
         fps: float = 5.0,
+        already_canonical: bool = True,
         graph_path: str | Path | None = None,
     ) -> str:
         scenario = (
@@ -296,6 +297,7 @@ class CameraManager(CameraSource):
                         fps=fps,
                     ),
                     "graph_id": graph_id,
+                    "already_canonical": already_canonical,
                     "description": (
                         scenario.description if scenario is not None else ""
                     ),
@@ -305,6 +307,7 @@ class CameraManager(CameraSource):
                 graph_id,
                 name=source_name,
                 fps=fps,
+                already_canonical=already_canonical,
                 graph_path=resolved_graph_path,
                 event_recorder=self._record_mock_event,
             ),
@@ -551,6 +554,16 @@ class CameraManager(CameraSource):
                 raise
             self._last_error = None
             return frame
+
+    def read_frame_with_metadata(
+        self,
+    ) -> tuple[BGRFrame, str, CameraMetadata]:
+        """Atomically capture a frame and the source metadata that produced it."""
+
+        with self._lock:
+            frame = self.read_frame()
+            source = self.current_source()
+            return frame, source.id, source.get_metadata()
 
     def get_metadata(self) -> CameraMetadata:
         with self._lock:

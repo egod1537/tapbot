@@ -8,6 +8,7 @@ import cv2
 from fastapi.testclient import TestClient
 import numpy as np
 
+from tapbot.camera.manager import CameraManager
 from tapbot.core.actions import EmergencyStopAction, MoveAction
 from tapbot.model.client import MockModelClient
 from tapbot.robot.mock import MockRobotController
@@ -386,6 +387,213 @@ class GreenButtonCamera(FakeCamera):
         super().__init__()
         self.frame = np.zeros((80, 120, 3), dtype=np.uint8)
         self.frame[30:50, 40:80] = (0, 255, 0)
+
+
+class PhoneScreenCamera(FakeCamera):
+    def __init__(self) -> None:
+        super().__init__()
+        self.frame = np.full((360, 480, 3), 30, dtype=np.uint8)
+        phone = np.array([[170, 20], [310, 30], [325, 335], [155, 330]])
+        cv2.fillConvexPoly(self.frame, phone, (225, 225, 225))
+        cv2.rectangle(self.frame, (200, 260), (280, 295), (0, 255, 0), -1)
+        cv2.polylines(self.frame, [phone], True, (5, 5, 5), 7)
+
+
+def test_phone_screen_api_creates_canonical_and_raw_overlay(
+    tmp_path: Path,
+) -> None:
+    app = create_app(
+        camera=PhoneScreenCamera(),
+        camera_fps=30,
+        calibration_store=CalibrationStore(tmp_path / "calibrations.json"),
+    )
+
+    with TestClient(app) as client:
+        wait_for_camera(client)
+        response = client.post(
+            "/api/vision/phone-screen/run",
+            json={"canonical_width": 140, "canonical_height": 300},
+        )
+        body = response.json()
+        canonical = client.get(
+            f"/api/vision/canonical/{body['canonical_result_id']}"
+        )
+        overlay = client.get(
+            "/api/vision/phone-screen/"
+            f"{body['phone_detection_result_id']}/overlay"
+        )
+        saved = client.post("/api/vision/frames")
+        vision = client.post(
+            "/api/vision/run",
+            json={
+                "frame_id": saved.json()["frame"]["frame_id"],
+                "confidence_threshold": 0,
+            },
+        )
+        stale = client.post(
+            "/api/vision/phone-screen/run",
+            json={"frame_id": 999_999},
+        )
+
+    assert response.status_code == 200
+    assert body["found"] is True
+    assert body["source"] == "contour"
+    assert body["frame"]["frame_id"] == body["frame_id"]
+    assert body["phone_detection_result_id"] > 0
+    assert body["canonical_result_id"] > 0
+    assert body["canonical"] == {"width": 140, "height": 300}
+    assert [point["label"] for point in body["overlay"]["corners"]] == [
+        "TL",
+        "TR",
+        "BR",
+        "BL",
+    ]
+    canonical_image = cv2.imdecode(
+        np.frombuffer(canonical.content, np.uint8),
+        cv2.IMREAD_COLOR,
+    )
+    overlay_image = cv2.imdecode(
+        np.frombuffer(overlay.content, np.uint8),
+        cv2.IMREAD_COLOR,
+    )
+    assert canonical.headers["content-type"] == "image/jpeg"
+    assert canonical_image.shape == (300, 140, 3)
+    assert overlay_image.shape == (360, 480, 3)
+    assert vision.status_code == 200
+    assert vision.json()["phone_screen"]["found"] is True
+    assert vision.json()["detections"][0]["label"] == "green_button"
+    assert stale.status_code == 404
+    assert stale.json()["detail"] == "stale_frame"
+
+
+def test_phone_screen_api_reports_no_candidate_without_calibration(
+    tmp_path: Path,
+) -> None:
+    app = create_app(
+        camera=FakeCamera(),
+        camera_fps=30,
+        calibration_store=CalibrationStore(tmp_path / "calibrations.json"),
+    )
+
+    with TestClient(app) as client:
+        wait_for_camera(client)
+        response = client.post("/api/vision/phone-screen/run", json={})
+
+    assert response.status_code == 200
+    assert response.json()["found"] is False
+    assert response.json()["failure_reason"] == "no_phone_candidate"
+    assert response.json()["canonical"] is None
+
+
+def test_screen_pipeline_api_returns_one_synchronized_physical_result(
+    tmp_path: Path,
+) -> None:
+    app = create_app(
+        camera=PhoneScreenCamera(),
+        camera_fps=30,
+        calibration_store=CalibrationStore(tmp_path / "calibrations.json"),
+    )
+
+    with TestClient(app) as client:
+        wait_for_camera(client)
+        response = client.post(
+            "/api/vision/screen-pipeline/run",
+            json={
+                "confidence_threshold": 0,
+                "canonical_width": 140,
+                "canonical_height": 300,
+            },
+        )
+        body = response.json()
+        raw = client.get(f"/api/vision/frames/{body['frame_id']}/raw")
+        canonical = client.get(
+            f"/api/vision/canonical/{body['canonical']['result_id']}"
+        )
+        overlay = client.get(
+            "/api/vision/phone-screen/"
+            f"{body['phone_detection']['result_id']}/overlay"
+        )
+        stale = client.post(
+            "/api/vision/screen-pipeline/run",
+            json={"frame_id": 999_999, "confidence_threshold": 0.5},
+        )
+        events = client.get("/api/logs").json()["entries"]
+
+    assert response.status_code == 200
+    assert body["frame_id"] == body["frame"]["frame_id"]
+    assert body["frame"]["source_id"] == "fake-camera"
+    assert body["already_canonical"] is False
+    assert body["phone_detection"]["found"] is True
+    assert body["phone_detection"]["source"] == "contour"
+    assert body["canonical"]["width"] == 140
+    assert body["canonical"]["height"] == 300
+    assert body["canonical"]["transform_skipped"] is False
+    assert body["detections"][0]["label"] == "green_button"
+    assert body["failure_stage"] is None
+    assert body["error"] is None
+    assert all(value >= 0 for value in body["timings"].values())
+    assert raw.headers["content-type"] == "image/jpeg"
+    assert canonical.headers["content-type"] == "image/jpeg"
+    assert overlay.headers["content-type"] == "image/jpeg"
+    assert stale.status_code == 404
+    assert stale.json()["detail"] == "stale_frame"
+    event_types = {entry["event_type"] for entry in events}
+    assert {
+        "screen.frame",
+        "screen.phone_detect.start",
+        "screen.phone_detect.result",
+        "screen.canonical.ready",
+        "screen.ui_detect.result",
+    } <= event_types
+
+
+def test_screen_pipeline_api_skips_geometry_for_canonical_mock() -> None:
+    manager = CameraManager.with_defaults(
+        "mock:reservation-flow",
+        discovery_max_index=None,
+    )
+    app = create_app(camera_manager=manager, camera_fps=30)
+
+    with TestClient(app) as client:
+        wait_for_camera(client)
+        response = client.post(
+            "/api/vision/screen-pipeline/run",
+            json={"confidence_threshold": 0.5},
+        )
+
+    body = response.json()
+    assert response.status_code == 200
+    assert body["already_canonical"] is True
+    assert body["frame"]["already_canonical"] is True
+    assert body["phone_detection"]["source"] == "already_canonical"
+    assert body["phone_detection"]["found"] is True
+    assert body["canonical"]["transform_skipped"] is True
+    assert body["canonical"]["width"] == body["frame"]["width"]
+    assert body["canonical"]["height"] == body["frame"]["height"]
+    assert body["timings"]["phone_detection_ms"] == 0
+    assert body["timings"]["canonical_transform_ms"] == 0
+
+
+def test_screen_pipeline_api_stops_when_phone_is_missing(tmp_path: Path) -> None:
+    app = create_app(
+        camera=FakeCamera(),
+        camera_fps=30,
+        calibration_store=CalibrationStore(tmp_path / "calibrations.json"),
+    )
+
+    with TestClient(app) as client:
+        wait_for_camera(client)
+        response = client.post(
+            "/api/vision/screen-pipeline/run",
+            json={"confidence_threshold": 0.5},
+        )
+
+    body = response.json()
+    assert response.status_code == 200
+    assert body["phone_detection"]["found"] is False
+    assert body["failure_stage"] == "phone_detection"
+    assert body["canonical"] is None
+    assert body["detections"] == []
 
 
 def test_vision_detections_and_debug_overlay_are_available_in_ui(

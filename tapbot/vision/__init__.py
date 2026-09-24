@@ -21,6 +21,9 @@ if TYPE_CHECKING:
         CoordinateTransformError,
         Point2D,
         RobotWorkArea,
+        perspective_matrix,
+        warp_perspective,
+        warp_quadrilateral,
     )
     from tapbot.vision.detector import (
         BoundingBox,
@@ -33,7 +36,23 @@ if TYPE_CHECKING:
         draw_debug_overlay,
         save_debug_overlay,
     )
-    from tapbot.vision.screen import PhoneScreenDetector
+    from tapbot.vision.screen import (
+        InvalidQuadrilateralError,
+        PhoneScreenDetection,
+        PhoneScreenDetectionError,
+        PhoneScreenDetector,
+        PhoneScreenDetectorConfig,
+        PhoneScreenNotFoundError,
+        PhoneScreenResult,
+        ScreenBoundingBox,
+        draw_phone_screen_overlay,
+        order_corners,
+    )
+    from tapbot.vision.pipeline import (
+        ScreenPipeline,
+        ScreenPipelineResult,
+        ScreenPipelineTimings,
+    )
 
 __all__ = [
     "CameraError",
@@ -51,12 +70,27 @@ __all__ = [
     "CoordinateTransformError",
     "Point2D",
     "RobotWorkArea",
+    "perspective_matrix",
+    "warp_perspective",
+    "warp_quadrilateral",
     "BoundingBox",
     "ColorButtonConfig",
     "ColorButtonDetector",
     "Detection",
     "Detector",
     "PhoneScreenDetector",
+    "PhoneScreenDetectorConfig",
+    "PhoneScreenDetection",
+    "PhoneScreenResult",
+    "PhoneScreenDetectionError",
+    "PhoneScreenNotFoundError",
+    "InvalidQuadrilateralError",
+    "ScreenBoundingBox",
+    "order_corners",
+    "draw_phone_screen_overlay",
+    "ScreenPipeline",
+    "ScreenPipelineResult",
+    "ScreenPipelineTimings",
     "VisionPipeline",
     "VisionResult",
     "draw_debug_overlay",
@@ -89,15 +123,39 @@ def __getattr__(name: str) -> Any:
         "CoordinateTransformError",
         "Point2D",
         "RobotWorkArea",
+        "perspective_matrix",
+        "warp_perspective",
+        "warp_quadrilateral",
     }
     if name in calibration_exports:
         from tapbot.vision import calibration
 
         return getattr(calibration, name)
-    if name == "PhoneScreenDetector":
+    screen_exports = {
+        "PhoneScreenDetector",
+        "PhoneScreenDetectorConfig",
+        "PhoneScreenDetection",
+        "PhoneScreenResult",
+        "PhoneScreenDetectionError",
+        "PhoneScreenNotFoundError",
+        "InvalidQuadrilateralError",
+        "ScreenBoundingBox",
+        "order_corners",
+        "draw_phone_screen_overlay",
+    }
+    if name in screen_exports:
         from tapbot.vision import screen
 
         return getattr(screen, name)
+    pipeline_exports = {
+        "ScreenPipeline",
+        "ScreenPipelineResult",
+        "ScreenPipelineTimings",
+    }
+    if name in pipeline_exports:
+        from tapbot.vision import pipeline
+
+        return getattr(pipeline, name)
     if name in __all__:
         from tapbot.vision import detector
 
