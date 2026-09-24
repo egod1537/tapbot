@@ -190,3 +190,6 @@ def __getattr__(name: str) -> Any:
 
         return getattr(detector, name)
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+from tapbot.vision.canonical import CanonicalVisionPipeline, CanonicalVisionResult
+
+__all__ = ["CanonicalVisionPipeline", "CanonicalVisionResult"]

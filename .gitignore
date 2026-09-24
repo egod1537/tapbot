@@ -11,4 +11,11 @@ frontend/.env.local
 frontend/.env.*.local
 /simulation-trace.json
 /replay-trace.json
+/tapbot-captures/
 *.pt
+android-agent/.gradle/
+android-agent/local.properties
+android-agent/**/build/
+android-agent/.idea/
+android-agent/captures/
+android-agent/*.iml

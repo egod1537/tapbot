@@ -9,6 +9,7 @@ from dataclasses import asdict, dataclass
 from itertools import count
 import json
 import math
+import os
 from pathlib import Path
 from threading import Lock
 from time import perf_counter
@@ -16,12 +17,19 @@ from collections.abc import Mapping, Sequence
 from typing import Annotated, AsyncIterator
 
 import cv2
+import numpy as np
+from numpy.typing import NDArray
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 import uvicorn
 
+from tapbot.android.client import (
+    AndroidAgentApiError,
+    AndroidAgentClient,
+    AndroidAgentTransportError,
+)
 from tapbot.camera.manager import CameraManager, CameraSourceNotFoundError
 from tapbot.camera.mock_graph import MockGraphStateError
 from tapbot.camera.source import CameraError, CameraSource
@@ -55,7 +63,9 @@ from tapbot.ui.services import (
     CameraFrameSnapshot,
     EventLog,
     RobotCommandDispatcher,
+    ScreenPipelineWorker,
 )
+from tapbot.ui.android_debug import AndroidDebugService, EncodedAndroidFrame
 from tapbot.vision.calibration import (
     Calibration,
     CalibrationError,
@@ -97,6 +107,13 @@ class WorkspaceBounds:
 class CoordinateRequest:
     x: float
     y: float
+
+
+@dataclass(frozen=True, slots=True)
+class AndroidTapRequest:
+    x: float
+    y: float
+    duration_ms: int = 70
 
 
 @dataclass(frozen=True, slots=True)
@@ -170,8 +187,14 @@ def create_app(
     calibration_store: CalibrationStore | None = None,
     vision_detectors: Sequence[Detector] | None = None,
     phone_object_detector: ObjectDetector | None = None,
+    live_detection_enabled: bool | None = None,
+    live_detection_target_fps: float | None = None,
+    live_detection_min_interval_ms: float | None = None,
     model_client: ModelClient | None = None,
     decision_policy: DecisionPolicy | None = None,
+    android_client: AndroidAgentClient | None = None,
+    android_debug_service: AndroidDebugService | None = None,
+    android_capture_dir: str | Path | None = None,
 ) -> FastAPI:
     robot = robot or MockRobotController()
     if camera is not None and camera_manager is not None:
@@ -183,6 +206,25 @@ def create_app(
     assert camera is not None
     bounds = bounds or WorkspaceBounds()
     event_log = EventLog()
+    android_mode_requested = (
+        android_client is not None
+        or android_debug_service is not None
+        or bool(os.getenv("TAPBOT_ANDROID_AGENT_URL", "").strip())
+        and bool(os.getenv("TAPBOT_ANDROID_AGENT_TOKEN", "").strip())
+    )
+    if live_detection_enabled is None:
+        live_detection_enabled = os.getenv(
+            "TAPBOT_VISION_LIVE_ENABLED",
+            "false" if android_mode_requested else "true",
+        ).strip().lower() in {"1", "true", "yes", "on"}
+    if live_detection_target_fps is None:
+        live_detection_target_fps = float(
+            os.getenv("TAPBOT_VISION_LIVE_TARGET_FPS", "10")
+        )
+    if live_detection_min_interval_ms is None:
+        live_detection_min_interval_ms = float(
+            os.getenv("TAPBOT_VISION_LIVE_MIN_INTERVAL_MS", "0")
+        )
 
     def record_simulation_event(
         event_type: str, payload: Mapping[str, object]
@@ -217,6 +259,27 @@ def create_app(
     camera_worker = CameraFrameWorker(camera, event_log, fps=camera_fps)
     calibration_store = calibration_store or CalibrationStore("tapbot-calibrations.json")
     vision_detectors = tuple(vision_detectors or (ColorButtonDetector(),))
+    if android_client is not None and android_debug_service is not None:
+        raise ValueError("Provide android_client or android_debug_service, not both")
+    if android_debug_service is None:
+        if android_client is None:
+            android_url = os.getenv("TAPBOT_ANDROID_AGENT_URL", "").strip()
+            android_token = os.getenv("TAPBOT_ANDROID_AGENT_TOKEN", "").strip()
+            if android_url and android_token:
+                android_client = AndroidAgentClient(android_url, android_token)
+        if android_client is not None:
+            android_debug_service = AndroidDebugService(
+                android_client,
+                vision_detectors,
+                event_log,
+                capture_dir=(
+                    android_capture_dir
+                    or os.getenv(
+                        "TAPBOT_ANDROID_CAPTURE_DIR",
+                        "tapbot-captures/android",
+                    )
+                ),
+            )
     if phone_object_detector is None:
         phone_object_detector = default_phone_object_detector()
 
@@ -249,6 +312,7 @@ def create_app(
     vision_frame_lock = Lock()
     vision_result_lock = Lock()
     phone_screen_result_lock = Lock()
+    screen_pipeline_lock = Lock()
     model_debug_lock = Lock()
     model_result_lock = Lock()
     saved_vision_frames: dict[int, CameraFrameSnapshot] = {}
@@ -285,12 +349,14 @@ def create_app(
             simulation_bridge.start()
         dispatcher.start()
         camera_worker.start()
+        screen_pipeline_worker.start()
         event_log.add("TapBot UI services started")
         try:
             yield
         finally:
             if simulation_bridge is not None:
                 simulation_bridge.close()
+            screen_pipeline_worker.stop()
             camera_worker.stop()
             dispatcher.shutdown()
             close_robot = getattr(robot, "close", None)
@@ -318,6 +384,10 @@ def create_app(
             "X-Preview-Height",
             "X-Center-Robot-X",
             "X-Center-Robot-Y",
+            "X-Screen-Width",
+            "X-Screen-Height",
+            "X-Rotation",
+            "X-Captured-At",
         ],
     )
     application.state.robot = robot
@@ -332,6 +402,7 @@ def create_app(
     application.state.model_client = model_client
     application.state.decision_policy = decision_policy
     application.state.simulation_bridge = simulation_bridge
+    application.state.android_debug_service = android_debug_service
     robot_state_lock = Lock()
     robot_state: dict[str, object] = {
         "x": 0.0,
@@ -394,7 +465,179 @@ def create_app(
             "vision_detectors": [
                 type(detector).__name__ for detector in vision_detectors
             ],
+            "android_configured": android_debug_service is not None,
+            "android_macro_status": (
+                None
+                if android_debug_service is None
+                else android_debug_service.macro_status
+            ),
         }
+
+    def require_android_debug() -> AndroidDebugService:
+        if android_debug_service is None:
+            raise HTTPException(
+                status_code=503,
+                detail=(
+                    "Android Agent is not configured. Set "
+                    "TAPBOT_ANDROID_AGENT_URL and TAPBOT_ANDROID_AGENT_TOKEN."
+                ),
+            )
+        return android_debug_service
+
+    async def call_android(operation):
+        try:
+            return await asyncio.to_thread(operation)
+        except AndroidAgentApiError as error:
+            event_log.add(
+                f"Android Agent API error: {error}",
+                level="error",
+                event_type="android.api.error",
+                category="android",
+                status="error",
+                payload={"code": error.code, "request_id": error.request_id},
+            )
+            raise HTTPException(
+                status_code=error.status or 502,
+                detail=f"{error.code}: {error}",
+            ) from error
+        except AndroidAgentTransportError as error:
+            event_log.add(
+                f"Android Agent transport error: {error}",
+                level="error",
+                event_type="android.transport.error",
+                category="android",
+                status="error",
+                payload={"outcome_unknown": error.outcome_unknown},
+            )
+            raise HTTPException(status_code=502, detail=str(error)) from error
+        except (OSError, ValueError, RuntimeError) as error:
+            event_log.add(
+                f"Android debug operation failed: {error}",
+                level="error",
+                event_type="android.operation.error",
+                category="android",
+                status="error",
+            )
+            raise HTTPException(status_code=500, detail=str(error)) from error
+
+    def android_frame_response(frame: EncodedAndroidFrame) -> Response:
+        return Response(
+            content=frame.content,
+            media_type="image/jpeg",
+            headers={
+                "Cache-Control": "no-store",
+                "X-Frame-Id": frame.frame_id,
+                "X-Screen-Width": str(frame.width),
+                "X-Screen-Height": str(frame.height),
+                "X-Rotation": str(frame.rotation),
+                "X-Captured-At": frame.captured_at,
+            },
+        )
+
+    @application.get("/api/android/status")
+    async def android_status() -> dict[str, object]:
+        if android_debug_service is None:
+            return {
+                "configured": False,
+                "connected": False,
+                "error": (
+                    "Set TAPBOT_ANDROID_AGENT_URL and "
+                    "TAPBOT_ANDROID_AGENT_TOKEN to connect."
+                ),
+                "agent": None,
+                "stream": None,
+                "macro_status": "IDLE",
+            }
+        return await call_android(android_debug_service.status)
+
+    @application.get("/api/android/screenshot")
+    async def android_screenshot() -> Response:
+        service = require_android_debug()
+        frame = await call_android(service.screenshot)
+        return android_frame_response(frame)
+
+    @application.post("/api/android/screenshot/save")
+    async def android_save_screenshot() -> dict[str, object]:
+        service = require_android_debug()
+        return await call_android(service.save_screenshot)
+
+    @application.get("/api/android/stream")
+    async def android_stream() -> StreamingResponse:
+        service = require_android_debug()
+        return StreamingResponse(
+            service.stream(),
+            media_type="multipart/x-mixed-replace; boundary=tapbotframe",
+            headers={"Cache-Control": "no-store"},
+        )
+
+    @application.post("/api/android/tap")
+    async def android_tap(payload: AndroidTapRequest) -> dict[str, object]:
+        if payload.duration_ms < 1 or payload.duration_ms > 10_000:
+            raise HTTPException(
+                status_code=422,
+                detail="duration_ms must be between 1 and 10000",
+            )
+        service = require_android_debug()
+        return await call_android(
+            lambda: service.manual_tap(
+                payload.x,
+                payload.y,
+                duration_ms=payload.duration_ms,
+            )
+        )
+
+    @application.post("/api/android/back")
+    async def android_back() -> dict[str, object]:
+        service = require_android_debug()
+        return await call_android(service.back)
+
+    @application.post("/api/android/home")
+    async def android_home() -> dict[str, object]:
+        service = require_android_debug()
+        return await call_android(service.home)
+
+    @application.post("/api/android/vision/run")
+    async def android_run_vision() -> dict[str, object]:
+        service = require_android_debug()
+        return await call_android(service.run_vision)
+
+    @application.get("/api/android/vision/frame")
+    async def android_vision_frame() -> Response:
+        service = require_android_debug()
+        frame = await call_android(service.latest_vision_frame)
+        if frame is None:
+            raise HTTPException(status_code=404, detail="No Android vision frame yet")
+        return android_frame_response(frame)
+
+    @application.get("/api/android/debug/state")
+    async def android_debug_state() -> dict[str, object]:
+        service = require_android_debug()
+        return await call_android(service.debug_state)
+
+    @application.post("/api/android/macro/start")
+    async def android_macro_start() -> dict[str, object]:
+        service = require_android_debug()
+        return await call_android(service.start_macro)
+
+    @application.post("/api/android/macro/pause")
+    async def android_macro_pause() -> dict[str, object]:
+        service = require_android_debug()
+        return await call_android(service.pause_macro)
+
+    @application.post("/api/android/macro/stop")
+    async def android_macro_stop() -> dict[str, object]:
+        service = require_android_debug()
+        return await call_android(service.stop_macro)
+
+    @application.post("/api/android/macro/reset")
+    async def android_macro_reset() -> dict[str, object]:
+        service = require_android_debug()
+        return await call_android(service.reset_macro)
+
+    @application.post("/api/android/macro/step")
+    async def android_macro_step() -> dict[str, object]:
+        service = require_android_debug()
+        return await call_android(service.step_macro)
 
     @application.get("/api/logs")
     async def logs(
@@ -634,6 +877,7 @@ def create_app(
 
         await asyncio.to_thread(camera_worker.stop)
         camera_worker.clear()
+        screen_pipeline_worker.invalidate()
         try:
             camera_manager.select(payload.source_id)
         except CameraSourceNotFoundError as error:
@@ -666,6 +910,7 @@ def create_app(
 
         await asyncio.to_thread(camera_worker.stop)
         camera_worker.clear()
+        screen_pipeline_worker.invalidate()
         try:
             await asyncio.to_thread(camera_manager.reconnect)
         except CameraError as error:
@@ -697,6 +942,7 @@ def create_app(
                 detail="The active camera source is not a mock graph",
             )
         camera_worker.clear()
+        screen_pipeline_worker.invalidate()
         event_log.add(
             f"Mock camera graph reset: {transition.to_state}",
             event_type="camera.graph.reset",
@@ -731,6 +977,7 @@ def create_app(
         transition = await asyncio.to_thread(camera_manager.reset_mock_graph)
         assert transition is not None
         camera_worker.clear()
+        screen_pipeline_worker.invalidate()
         return {
             "transition": transition.to_dict(),
             "status": await asyncio.to_thread(mock_graph_status_snapshot),
@@ -744,6 +991,7 @@ def create_app(
             camera_manager.tap, payload.x, payload.y
         )
         camera_worker.clear()
+        screen_pipeline_worker.invalidate()
         status = await asyncio.to_thread(mock_graph_status_snapshot)
         return {
             "hit": transition is not None,
@@ -768,6 +1016,7 @@ def create_app(
             raise HTTPException(status_code=422, detail=str(error)) from error
         assert transition is not None
         camera_worker.clear()
+        screen_pipeline_worker.invalidate()
         return {
             "transition": transition.to_dict(),
             "status": await asyncio.to_thread(mock_graph_status_snapshot),
@@ -1103,8 +1352,9 @@ def create_app(
             headers={"Cache-Control": "no-store"},
         )
 
-    @application.post("/api/vision/screen-pipeline/run")
-    async def run_screen_pipeline(
+    def process_screen_snapshot(
+        snapshot: CameraFrameSnapshot,
+        frame: NDArray[np.uint8],
         payload: ScreenPipelineRunRequest,
     ) -> dict[str, object]:
         if (
@@ -1115,23 +1365,6 @@ def create_app(
                 status_code=422,
                 detail="confidence_threshold must be between 0 and 1",
             )
-        if payload.frame_id is None:
-            snapshot = camera_worker.freeze_latest_frame()
-            if snapshot is None:
-                raise HTTPException(
-                    status_code=503,
-                    detail=camera_worker.error or "Camera frame is not available yet",
-                )
-            remember_vision_frame(snapshot)
-        else:
-            with vision_frame_lock:
-                snapshot = saved_vision_frames.get(payload.frame_id)
-            if snapshot is None:
-                raise HTTPException(status_code=404, detail="stale_frame")
-        frame = camera_worker.frozen_bgr_frame(snapshot.frame_id)
-        if frame is None:
-            raise HTTPException(status_code=404, detail="stale_frame")
-
         descriptors = [
             (detector, detector_descriptor(detector)) for detector in vision_detectors
         ]
@@ -1157,24 +1390,21 @@ def create_app(
                 active_calibration if payload.use_calibration_fallback else None
             )
         try:
-            detector_config = PhoneScreenDetectorConfig(
-                canonical_width=payload.canonical_width,
-                canonical_height=payload.canonical_height,
-                bbox_fallback=bbox_fallback_enabled(),
-            )
-            pipeline = ScreenPipeline(
-                create_phone_detector(fallback_calibration, detector_config),
-                selected_detectors,
-                already_canonical=bool(
-                    snapshot.source_metadata.get("already_canonical", False)
-                ),
-                event_recorder=screen_pipeline_event,
-            )
-            pipeline_result = await asyncio.to_thread(
-                pipeline.run,
-                frame,
-                frame_id=snapshot.frame_id,
-            )
+            with screen_pipeline_lock:
+                detector_config = PhoneScreenDetectorConfig(
+                    canonical_width=payload.canonical_width,
+                    canonical_height=payload.canonical_height,
+                    bbox_fallback=bbox_fallback_enabled(),
+                )
+                pipeline = ScreenPipeline(
+                    create_phone_detector(fallback_calibration, detector_config),
+                    selected_detectors,
+                    already_canonical=bool(
+                        snapshot.source_metadata.get("already_canonical", False)
+                    ),
+                    event_recorder=screen_pipeline_event,
+                )
+                pipeline_result = pipeline.run(frame, frame_id=snapshot.frame_id)
         except (CalibrationError, PhoneScreenDetectionError, ValueError, cv2.error) as error:
             screen_pipeline_event(
                 "screen.pipeline.error",
@@ -1208,16 +1438,10 @@ def create_app(
             pipeline_result.phone_detection.found
             or pipeline_result.phone_detection.phone_bbox is not None
         ):
-            overlay = await asyncio.to_thread(
-                draw_phone_screen_overlay,
-                frame,
-                pipeline_result.phone_detection,
+            overlay = draw_phone_screen_overlay(
+                frame, pipeline_result.phone_detection
             )
-            overlay_success, overlay_encoded = await asyncio.to_thread(
-                cv2.imencode,
-                ".jpg",
-                overlay,
-            )
+            overlay_success, overlay_encoded = cv2.imencode(".jpg", overlay)
             if overlay_success:
                 with phone_screen_result_lock:
                     phone_screen_overlay_images[phone_detection_result_id] = (
@@ -1230,11 +1454,7 @@ def create_app(
         canonical_image = pipeline_result.canonical_image
         if canonical_image is None:
             return response
-        canonical_success, canonical_encoded = await asyncio.to_thread(
-            cv2.imencode,
-            ".jpg",
-            canonical_image,
-        )
+        canonical_success, canonical_encoded = cv2.imencode(".jpg", canonical_image)
         if not canonical_success:
             screen_pipeline_event(
                 "screen.pipeline.error",
@@ -1286,6 +1506,95 @@ def create_app(
         }
         response["detections"] = detection_values
         return response
+
+    def process_live_screen_snapshot(
+        snapshot: CameraFrameSnapshot,
+        frame: NDArray[np.uint8],
+    ) -> dict[str, object]:
+        return process_screen_snapshot(
+            snapshot,
+            frame,
+            ScreenPipelineRunRequest(confidence_threshold=0.5),
+        )
+
+    screen_pipeline_worker = ScreenPipelineWorker(
+        camera_worker,
+        process_live_screen_snapshot,
+        event_log,
+        enabled=live_detection_enabled,
+        target_fps=live_detection_target_fps,
+        min_interval_ms=live_detection_min_interval_ms,
+    )
+    application.state.screen_pipeline_worker = screen_pipeline_worker
+
+    @application.get("/api/vision/live/status")
+    async def live_screen_status() -> dict[str, object]:
+        return screen_pipeline_worker.status()
+
+    @application.post("/api/vision/live/start")
+    async def start_live_screen_detection() -> dict[str, object]:
+        screen_pipeline_worker.enable()
+        return screen_pipeline_worker.status()
+
+    @application.post("/api/vision/live/stop")
+    async def stop_live_screen_detection() -> dict[str, object]:
+        screen_pipeline_worker.disable()
+        return screen_pipeline_worker.status()
+
+    @application.get("/api/vision/live/result")
+    async def latest_live_screen_result() -> dict[str, object]:
+        result = screen_pipeline_worker.latest_result()
+        if result is None:
+            raise HTTPException(status_code=404, detail="live_result_not_available")
+        return result.to_dict()
+
+    @application.get("/api/vision/live/canonical")
+    async def latest_live_canonical() -> Response:
+        result = screen_pipeline_worker.latest_result()
+        if result is None or result.result is None:
+            raise HTTPException(status_code=404, detail="live_result_not_available")
+        canonical = result.result.get("canonical")
+        if not isinstance(canonical, dict):
+            raise HTTPException(status_code=404, detail="canonical_not_available")
+        result_id = canonical.get("result_id")
+        if not isinstance(result_id, int):
+            raise HTTPException(status_code=404, detail="canonical_not_available")
+        with phone_screen_result_lock:
+            jpeg = phone_screen_canonical_images.get(result_id)
+        if jpeg is None:
+            raise HTTPException(status_code=404, detail="canonical_not_available")
+        return Response(
+            content=jpeg,
+            media_type="image/jpeg",
+            headers={"Cache-Control": "no-store"},
+        )
+
+    @application.post("/api/vision/screen-pipeline/run")
+    async def run_screen_pipeline(
+        payload: ScreenPipelineRunRequest,
+    ) -> dict[str, object]:
+        if payload.frame_id is None:
+            snapshot = camera_worker.freeze_latest_frame()
+            if snapshot is None:
+                raise HTTPException(
+                    status_code=503,
+                    detail=camera_worker.error or "Camera frame is not available yet",
+                )
+            remember_vision_frame(snapshot)
+        else:
+            with vision_frame_lock:
+                snapshot = saved_vision_frames.get(payload.frame_id)
+            if snapshot is None:
+                raise HTTPException(status_code=404, detail="stale_frame")
+        frame = camera_worker.frozen_bgr_frame(snapshot.frame_id)
+        if frame is None:
+            raise HTTPException(status_code=404, detail="stale_frame")
+        return await asyncio.to_thread(
+            process_screen_snapshot,
+            snapshot,
+            frame,
+            payload,
+        )
 
     @application.post("/api/vision/phone-screen/run")
     async def run_phone_screen_detection(

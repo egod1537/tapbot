@@ -162,3 +162,27 @@ export interface ScreenPipelineRunResult {
   failure_stage: ScreenPipelineFailureStage | null
   error: string | null
 }
+
+export interface LiveVisionStatus {
+  enabled: boolean
+  target_fps: number
+  min_interval_ms: number
+  running: boolean
+  source_id: string | null
+  last_processed_frame_id: number | null
+  last_result_frame_id: number | null
+  last_latency_ms: number | null
+  dropped_frames: number
+}
+
+export interface LatestScreenPipelineResult {
+  frame_id: number
+  source_id: string | null
+  started_at: string
+  completed_at: string
+  result: ScreenPipelineRunResult | null
+  canonical_result_id: number | null
+  failure_stage: ScreenPipelineFailureStage | 'worker' | null
+  error: string | null
+  latency_ms: number
+}

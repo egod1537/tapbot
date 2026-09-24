@@ -113,12 +113,9 @@ export function RawCanonicalWorkspace({
   const overlay = useMemo(() => phoneOverlay(workspace), [workspace])
   const result = workspace.result
   const phone = result?.phone_detection ?? null
-  const frozenFrame = result?.frame ?? null
-  const rawSource = frozenFrame
-    ? visionApi.rawFrameUrl(frozenFrame.frame_id)
-    : camera.frame?.objectUrl
-  const rawWidth = frozenFrame?.width ?? camera.frame?.width
-  const rawHeight = frozenFrame?.height ?? camera.frame?.height
+  const rawSource = camera.frame?.objectUrl
+  const rawWidth = camera.frame?.width
+  const rawHeight = camera.frame?.height
   const canonical = result?.canonical ?? null
   const selectedDetection =
     result?.detections.find(
@@ -136,7 +133,8 @@ export function RawCanonicalWorkspace({
           <h1 id="dual-view-title">Raw / Canonical</h1>
         </div>
         <div className="dual-view-sync-tags" aria-label="Synchronized result IDs">
-          <Tag minimal>Frame #{result?.frame_id ?? '—'}</Tag>
+          <Tag minimal>Live #{camera.frame?.frameId ?? '—'}</Tag>
+          <Tag minimal>Vision #{result?.frame_id ?? '—'}</Tag>
           <Tag minimal>Phone #{phone?.result_id ?? '—'}</Tag>
           <Tag minimal>Canonical #{canonical?.result_id ?? '—'}</Tag>
           {result?.already_canonical && (
@@ -152,6 +150,12 @@ export function RawCanonicalWorkspace({
               {result.timings.canonical_transform_ms.toFixed(1)} ms · UI{' '}
               {result.timings.ui_detection_ms.toFixed(1)} ms · Total{' '}
               {result.timings.total_ms.toFixed(1)} ms
+            </Tag>
+          )}
+          {workspace.liveStatus?.enabled && (
+            <Tag intent={workspace.liveStatus.running ? 'primary' : 'success'} minimal>
+              LIVE VISION {workspace.liveStatus.running ? 'RUNNING' : 'READY'} · dropped{' '}
+              {workspace.liveStatus.dropped_frames}
             </Tag>
           )}
         </div>
@@ -213,18 +217,14 @@ export function RawCanonicalWorkspace({
                 <>
                   <img
                     src={rawSource}
-                    alt={
-                      frozenFrame
-                        ? `Frozen raw camera frame ${frozenFrame.frame_id.toString()}`
-                        : `Live camera frame ${camera.frame?.frameId.toString() ?? ''}`
-                    }
+                    alt={`Live camera frame ${camera.frame?.frameId.toString() ?? ''}`}
                   />
                   {rawMode === 'phone-overlay' && overlay && (
                     <CameraOverlay overlay={overlay} showLabels showConfidence />
                   )}
                   <div className="dual-view-stage__meta">
-                    <Tag minimal>
-                      {frozenFrame ? 'FROZEN RESULT FRAME' : 'LIVE PREVIEW'}
+                    <Tag intent="success" minimal>
+                      LIVE PREVIEW
                     </Tag>
                     {rawWidth && rawHeight && (
                       <Tag minimal>
@@ -278,7 +278,9 @@ export function RawCanonicalWorkspace({
                 <span>
                   {phone?.found
                     ? `Detected by ${phone.source ?? 'unknown source'}`
-                    : 'Run detection to lock a frame and locate the phone screen.'}
+                    : workspace.liveStatus?.enabled
+                      ? 'Live detection is waiting for a phone screen.'
+                      : 'Run detection to locate the phone screen.'}
                 </span>
               )}
             </footer>
@@ -360,7 +362,9 @@ export function RawCanonicalWorkspace({
                   <span>
                     {workspace.phoneStatus === 'not-found'
                       ? 'A canonical image cannot be created until the phone is found.'
-                      : 'Run screen detection to create a synchronized result.'}
+                      : workspace.liveStatus?.enabled
+                        ? 'Waiting for the live vision worker.'
+                        : 'Run screen detection to create a result.'}
                   </span>
                 </div>
               )}

@@ -17,6 +17,8 @@ export interface BackendSystemStatus {
   model_connected: boolean
   model_latency_ms: number | null
   vision_detectors: string[]
+  android_configured: boolean
+  android_macro_status: string | null
 }
 
 export type BackendConnectionState = 'connecting' | 'online' | 'offline'

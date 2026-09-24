@@ -1,14 +1,12 @@
-import { useCameraStream } from '../features/camera/useCameraStream'
-import { RawCanonicalWorkspace } from '../features/debug/RawCanonicalWorkspace'
-import { useRawCanonicalView } from '../features/vision/useRawCanonicalView'
+import { AndroidDebugWorkspace } from '../features/android/AndroidDebugWorkspace'
+import { useAndroidDebug } from '../features/android/useAndroidDebug'
 
 export function DebugPage() {
-  const camera = useCameraStream()
-  const workspace = useRawCanonicalView(camera)
+  const controller = useAndroidDebug()
 
   return (
     <div className="vision-workspace-page">
-      <RawCanonicalWorkspace camera={camera} workspace={workspace} />
+      <AndroidDebugWorkspace controller={controller} />
     </div>
   )
 }

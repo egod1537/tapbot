@@ -1,6 +1,8 @@
 import { apiClient } from '../../lib/api-client'
 import { apiUrl } from '../../lib/config'
 import type {
+  LatestScreenPipelineResult,
+  LiveVisionStatus,
   PhoneScreenRunPayload,
   PhoneScreenRunResult,
   SavedVisionFrameResponse,
@@ -22,6 +24,13 @@ export const visionApi = {
     apiClient.post<PhoneScreenRunResult>('vision/phone-screen/run', payload),
   runScreenPipeline: (payload: ScreenPipelineRunPayload) =>
     apiClient.post<ScreenPipelineRunResult>('vision/screen-pipeline/run', payload),
+  liveStatus: (signal?: AbortSignal) =>
+    apiClient.get<LiveVisionStatus>('vision/live/status', { signal }),
+  liveResult: (signal?: AbortSignal) =>
+    apiClient.get<LatestScreenPipelineResult>('vision/live/result', { signal }),
+  startLive: () => apiClient.post<LiveVisionStatus>('vision/live/start'),
+  stopLive: () => apiClient.post<LiveVisionStatus>('vision/live/stop'),
+  liveCanonicalUrl: () => apiUrl('vision/live/canonical'),
   rawFrameUrl: (frameId: number) => apiUrl(`vision/frames/${frameId.toString()}/raw`),
   rectifiedUrl: (resultId: number) =>
     apiUrl(`vision/results/${resultId.toString()}/rectified`),

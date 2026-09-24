@@ -1,4 +1,5 @@
-export type TimelineCategory = 'camera' | 'vision' | 'model' | 'robot' | 'system'
+export type TimelineCategory =
+  'android' | 'camera' | 'macro' | 'vision' | 'model' | 'robot' | 'system'
 
 export interface TimelineEvent {
   id: number

@@ -310,6 +310,16 @@ class CameraFrameWorker:
         with self._lock:
             return None if self._frame is None else self._frame.copy()
 
+    def latest_frame_with_bgr(
+        self,
+    ) -> tuple[CameraFrameSnapshot, NDArray[np.uint8]] | None:
+        """Atomically copy the latest snapshot and its matching BGR frame."""
+
+        with self._lock:
+            if self._snapshot is None or self._frame is None:
+                return None
+            return self._snapshot, self._frame.copy()
+
     def freeze_latest_frame(self) -> CameraFrameSnapshot | None:
         """Pin the latest BGR frame for a later calibration preview."""
 
@@ -437,3 +447,229 @@ class CameraFrameWorker:
             self._event_log.add(f"Unexpected camera error: {error}", level="error")
         finally:
             self.camera.close()
+
+
+@dataclass(frozen=True, slots=True)
+class LatestScreenPipelineResult:
+    frame_id: int
+    source_id: str | None
+    started_at: str
+    completed_at: str
+    result: dict[str, object] | None
+    failure_stage: str | None
+    error: str | None
+    latency_ms: float
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "frame_id": self.frame_id,
+            "source_id": self.source_id,
+            "started_at": self.started_at,
+            "completed_at": self.completed_at,
+            "result": self.result,
+            "canonical_result_id": (
+                None
+                if self.result is None
+                or not isinstance(self.result.get("canonical"), dict)
+                else self.result["canonical"].get("result_id")
+            ),
+            "failure_stage": self.failure_stage,
+            "error": self.error,
+            "latency_ms": self.latency_ms,
+        }
+
+
+ScreenPipelineProcessor = Callable[
+    [CameraFrameSnapshot, NDArray[np.uint8]],
+    dict[str, object],
+]
+
+
+class ScreenPipelineWorker:
+    """Process only the latest camera frame without building a queue."""
+
+    def __init__(
+        self,
+        camera_worker: CameraFrameWorker,
+        processor: ScreenPipelineProcessor,
+        event_log: EventLog,
+        *,
+        enabled: bool = True,
+        target_fps: float = 10.0,
+        min_interval_ms: float = 0.0,
+    ) -> None:
+        if target_fps <= 0:
+            raise ValueError("target_fps must be positive")
+        if min_interval_ms < 0:
+            raise ValueError("min_interval_ms must not be negative")
+        self.camera_worker = camera_worker
+        self._processor = processor
+        self._event_log = event_log
+        self.target_fps = target_fps
+        self.min_interval_ms = min_interval_ms
+        self._interval = max(1 / target_fps, min_interval_ms / 1000)
+        self._enabled = enabled
+        self._stop = Event()
+        self._wake = Event()
+        self._lock = Lock()
+        self._thread: Thread | None = None
+        self._running = False
+        self._generation = 0
+        self._source_id: str | None = None
+        self._last_processed_frame_id: int | None = None
+        self._latest_result: LatestScreenPipelineResult | None = None
+        self._last_latency_ms: float | None = None
+        self._dropped_frames = 0
+
+    def start(self) -> None:
+        if self._thread is not None and self._thread.is_alive():
+            return
+        self._stop.clear()
+        self._thread = Thread(
+            target=self._run,
+            name="tapbot-screen-pipeline",
+            daemon=True,
+        )
+        self._thread.start()
+
+    def stop(self, *, timeout: float = 5.0) -> None:
+        self._stop.set()
+        self._wake.set()
+        thread = self._thread
+        if thread is not None:
+            thread.join(timeout)
+        self._thread = None
+
+    def enable(self) -> None:
+        with self._lock:
+            self._enabled = True
+        self._wake.set()
+
+    def disable(self) -> None:
+        with self._lock:
+            self._enabled = False
+        self._wake.set()
+
+    def invalidate(self) -> None:
+        """Discard old-source state and reject any in-flight result."""
+
+        with self._lock:
+            self._generation += 1
+            self._source_id = None
+            self._last_processed_frame_id = None
+            self._latest_result = None
+            self._last_latency_ms = None
+            self._dropped_frames = 0
+        self._wake.set()
+
+    def latest_result(self) -> LatestScreenPipelineResult | None:
+        with self._lock:
+            return self._latest_result
+
+    def status(self) -> dict[str, object]:
+        with self._lock:
+            result = self._latest_result
+            return {
+                "enabled": self._enabled,
+                "target_fps": self.target_fps,
+                "min_interval_ms": self.min_interval_ms,
+                "running": self._running,
+                "source_id": self._source_id,
+                "last_processed_frame_id": self._last_processed_frame_id,
+                "last_result_frame_id": None if result is None else result.frame_id,
+                "last_latency_ms": self._last_latency_ms,
+                "dropped_frames": self._dropped_frames,
+            }
+
+    def _run(self) -> None:
+        while not self._stop.is_set():
+            with self._lock:
+                enabled = self._enabled
+            if not enabled:
+                self._wait(0.1)
+                continue
+            latest = self.camera_worker.latest_frame_with_bgr()
+            if latest is None:
+                self._wait(min(self._interval, 0.1))
+                continue
+            snapshot, frame = latest
+            with self._lock:
+                if snapshot.source_id != self._source_id:
+                    self._generation += 1
+                    self._source_id = snapshot.source_id
+                    self._last_processed_frame_id = None
+                    self._latest_result = None
+                    self._last_latency_ms = None
+                    self._dropped_frames = 0
+                previous_frame_id = self._last_processed_frame_id
+                if previous_frame_id == snapshot.frame_id:
+                    should_wait = True
+                    generation = self._generation
+                else:
+                    should_wait = False
+                    if (
+                        previous_frame_id is not None
+                        and snapshot.frame_id > previous_frame_id + 1
+                    ):
+                        self._dropped_frames += (
+                            snapshot.frame_id - previous_frame_id - 1
+                        )
+                    self._last_processed_frame_id = snapshot.frame_id
+                    self._running = True
+                    generation = self._generation
+            if should_wait:
+                self._wait(min(self._interval, 0.05))
+                continue
+
+            started_clock = perf_counter()
+            started_at = datetime.now(timezone.utc).isoformat()
+            result_payload: dict[str, object] | None = None
+            failure_stage: str | None = None
+            error_message: str | None = None
+            try:
+                result_payload = self._processor(snapshot, frame)
+                failure_value = result_payload.get("failure_stage")
+                failure_stage = (
+                    None if failure_value is None else str(failure_value)
+                )
+                error_value = result_payload.get("error")
+                error_message = None if error_value is None else str(error_value)
+            except Exception as error:
+                failure_stage = "worker"
+                error_message = str(error)
+                self._event_log.add(
+                    f"Live screen pipeline error: {error}",
+                    level="error",
+                    event_type="screen.pipeline.error",
+                    category="vision",
+                    status="error",
+                    trace_id=f"frame-{snapshot.frame_id}",
+                    payload={
+                        "frame_id": snapshot.frame_id,
+                        "stage": "worker",
+                        "error": str(error),
+                    },
+                )
+            latency_ms = (perf_counter() - started_clock) * 1000
+            completed_at = datetime.now(timezone.utc).isoformat()
+            latest_result = LatestScreenPipelineResult(
+                frame_id=snapshot.frame_id,
+                source_id=snapshot.source_id,
+                started_at=started_at,
+                completed_at=completed_at,
+                result=result_payload,
+                failure_stage=failure_stage,
+                error=error_message,
+                latency_ms=latency_ms,
+            )
+            with self._lock:
+                if generation == self._generation:
+                    self._latest_result = latest_result
+                    self._last_latency_ms = latency_ms
+                self._running = False
+            elapsed = perf_counter() - started_clock
+            self._wait(max(0.0, self._interval - elapsed))
+
+    def _wait(self, timeout: float) -> None:
+        self._wake.wait(timeout)
+        self._wake.clear()
