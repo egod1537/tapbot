@@ -10,29 +10,41 @@ import { useEffect, useState } from 'react'
 import { NavLink, useLocation } from 'react-router-dom'
 import { useSystemStatus } from '../app/system-status'
 import { androidApi } from '../features/android/android-api'
-import type { AndroidProxyStatus } from '../types/android-debug'
+import type { AndroidDeviceSummary } from '../types/android-debug'
 
 export function Header() {
   const system = useSystemStatus()
   const location = useLocation()
-  const [android, setAndroid] = useState<AndroidProxyStatus | null>(null)
+  const [android, setAndroid] = useState<AndroidDeviceSummary | null>(null)
 
   useEffect(() => {
     const controller = new AbortController()
     const refresh = async () => {
       try {
-        setAndroid(await androidApi.status(controller.signal))
+        const response = await androidApi.devices(controller.signal)
+        const routeId = location.pathname.startsWith('/debug/android/')
+          ? decodeURIComponent(location.pathname.slice('/debug/android/'.length))
+          : null
+        setAndroid(
+          response.devices.find((device) => device.id === routeId) ??
+            response.devices.find(
+              (device) => device.id === response.default_device_id,
+            ) ??
+            response.devices.find((device) => device.connected) ??
+            response.devices[0] ??
+            null,
+        )
       } catch {
         if (!controller.signal.aborted) setAndroid(null)
       }
     }
     void refresh()
-    const timer = window.setInterval(() => void refresh(), 2_000)
+    const timer = window.setInterval(() => void refresh(), 7_500)
     return () => {
       controller.abort()
       window.clearInterval(timer)
     }
-  }, [])
+  }, [location.pathname])
 
   const workspace = location.pathname.startsWith('/tools/webcam')
     ? 'Legacy Webcam'
@@ -71,8 +83,8 @@ export function Header() {
           {android?.connected ? 'ONLINE' : 'OFFLINE'}
         </Tag>
         <span>Stream</span>
-        <Tag intent={android?.stream?.running ? 'success' : 'warning'} minimal>
-          {android?.stream?.running ? 'LIVE' : 'OFF'}
+        <Tag intent={android?.stream_running ? 'success' : 'warning'} minimal>
+          {android?.stream_running ? 'LIVE' : 'OFF'}
         </Tag>
         <span>Macro</span>
         <Tag intent={android?.macro_status === 'RUNNING' ? 'success' : 'none'} minimal>

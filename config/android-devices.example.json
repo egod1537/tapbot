@@ -1,0 +1,19 @@
+{
+  "default_device_id": "galaxy-note10",
+  "devices": [
+    {
+      "id": "galaxy-note10",
+      "name": "Note10",
+      "base_url": "http://192.168.0.20:8765",
+      "token": "replace-via-TAPBOT_ANDROID_DEVICE_GALAXY_NOTE10_TOKEN",
+      "enabled": true
+    },
+    {
+      "id": "galaxy-s20",
+      "name": "S20",
+      "base_url": "http://192.168.0.21:8765",
+      "token": "replace-via-TAPBOT_ANDROID_DEVICE_GALAXY_S20_TOKEN",
+      "enabled": true
+    }
+  ]
+}

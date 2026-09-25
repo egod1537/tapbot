@@ -11,13 +11,19 @@ from uuid import uuid4
 
 import cv2
 
-from tapbot.android.client import AndroidAgentClient
+from tapbot.android.client import AndroidAgentClient, AndroidUiTree
 from tapbot.device.android import AndroidRemoteController
+from tapbot.device.gesture import (
+    PointerGesture,
+    PointerGestureBoundsError,
+    PointerPoint,
+)
 from tapbot.macro import (
     DetectionStateClassifier,
     DetectionStateRule,
     MacroEngine,
     MacroStateMachine,
+    StateClassification,
     StateClassifier,
     TapTargetAction,
 )
@@ -26,6 +32,13 @@ from tapbot.screen.android import AndroidRemoteScreenSource
 from tapbot.screen.geometry import ScreenGeometry
 from tapbot.screen.source import ScreenFrame
 from tapbot.ui.services import EventLog
+from tapbot.ui_resolution import (
+    AccessibilityStateClassifier,
+    AccessibilityStateRule,
+    AndroidAccessibilityUiTreeProvider,
+    HybridTargetResolver,
+    UiSelector,
+)
 from tapbot.vision.canonical import CanonicalVisionPipeline, CanonicalVisionResult
 from tapbot.vision.detector import Detector
 
@@ -51,15 +64,28 @@ class AndroidDebugService:
         *,
         classifier: StateClassifier | None = None,
         state_machine: MacroStateMachine | None = None,
+        device_id: str = "default",
+        device_name: str | None = None,
         capture_dir: str | Path = "tapbot-captures/android",
     ) -> None:
+        self.device_id = device_id
+        self.device_name = device_name or device_id
         self.client = client
-        self.source = AndroidRemoteScreenSource(client)
+        self.source = AndroidRemoteScreenSource(
+            client,
+            source_id=f"android:{device_id}",
+        )
         self.controller = AndroidRemoteController(client)
         self.vision = CanonicalVisionPipeline(detectors)
         self.classifier = classifier or _default_classifier()
         self.state_machine = state_machine or _default_state_machine()
         self.target_resolver = TargetResolver(minimum_detection_confidence=0.5)
+        self.ui_tree_provider = AndroidAccessibilityUiTreeProvider(client)
+        self.hybrid_target_resolver = HybridTargetResolver(
+            self.target_resolver,
+            _default_ui_selectors(),
+        )
+        self.ui_tree_state_classifier = _default_ui_state_classifier()
         self.event_log = event_log
         self.capture_dir = Path(capture_dir)
         self._lock = RLock()
@@ -71,6 +97,8 @@ class AndroidDebugService:
         self._state_confidence = 0.0
         self._latest_vision: CanonicalVisionResult | None = None
         self._latest_frame_jpeg: bytes | None = None
+        self._latest_ui_tree: AndroidUiTree | None = None
+        self._ui_tree_error: str | None = None
         self._last_action: dict[str, object] | None = None
         self._last_action_result: dict[str, object] | None = None
         self._blocked_reason: str | None = None
@@ -83,6 +111,8 @@ class AndroidDebugService:
             with self._lock:
                 self._last_error = str(error)
             return {
+                "device_id": self.device_id,
+                "name": self.device_name,
                 "configured": True,
                 "connected": False,
                 "error": str(error),
@@ -94,6 +124,8 @@ class AndroidDebugService:
         with self._lock:
             self._last_error = None
         return {
+            "device_id": self.device_id,
+            "name": self.device_name,
             "configured": True,
             "connected": True,
             "error": None,
@@ -128,10 +160,13 @@ class AndroidDebugService:
             event_type="android.screenshot.saved",
             category="android",
             status="success",
-            payload={"frame_id": frame.frame_id, "path": str(destination)},
+            payload=self._event_payload(
+                {"frame_id": frame.frame_id, "path": str(destination)}
+            ),
         )
         return {
             "ok": True,
+            "device_id": self.device_id,
             "frame": _frame_metadata(frame),
             "path": str(destination),
         }
@@ -140,6 +175,15 @@ class AndroidDebugService:
         frame = self.source.screenshot()
         result = self.vision.run(frame)
         classification = self.classifier.classify(frame, result.detections)
+        tree = self._capture_ui_tree(max_age_ms=500)
+        if tree is not None:
+            accessibility_classification = self.ui_tree_state_classifier.classify(tree)
+            if accessibility_classification is not None:
+                classification = StateClassification(
+                    accessibility_classification.state,
+                    accessibility_classification.confidence,
+                    accessibility_classification.evidence,
+                )
         encoded = _encode_jpeg(frame)
         with self._lock:
             if classification.state != self._current_state:
@@ -157,12 +201,43 @@ class AndroidDebugService:
             status="success",
             latency_ms=result.ui_detection_ms,
             payload={
+                "device_id": self.device_id,
+                "source_id": frame.source_id,
                 "frame_id": frame.frame_id,
                 "state": classification.state,
                 "detections": len(result.detections),
             },
         )
         return self.debug_state()
+
+    def ui_tree(self) -> dict[str, object]:
+        try:
+            tree = self.ui_tree_provider.snapshot(max_age_ms=250)
+        except Exception as error:
+            with self._lock:
+                self._ui_tree_error = str(error)
+            raise
+        with self._lock:
+            self._latest_ui_tree = tree
+            self._ui_tree_error = None
+        self.event_log.add(
+            f"Android UI tree captured: {len(tree.nodes)} nodes",
+            event_type="android.ui_tree.captured",
+            category="android",
+            status="success",
+            payload=self._event_payload(
+                {
+                    "package_name": tree.package_name,
+                    "node_count": len(tree.nodes),
+                    "truncated": tree.truncated,
+                }
+            ),
+        )
+        return {
+            "device_id": self.device_id,
+            "source_id": f"android:{self.device_id}",
+            **tree.to_dict(),
+        }
 
     def latest_vision_frame(self) -> EncodedAndroidFrame | None:
         with self._lock:
@@ -192,8 +267,10 @@ class AndroidDebugService:
         )
         device_x, device_y = geometry.screen_to_device(x, y)
         result = self.controller.tap(device_x, device_y, duration_ms=duration_ms)
+        self.ui_tree_provider.invalidate()
         payload = {
             "ok": True,
+            "device_id": self.device_id,
             "screen": {"x": x, "y": y},
             "device": {"x": device_x, "y": device_y},
             "result": result.to_dict(),
@@ -211,17 +288,124 @@ class AndroidDebugService:
         )
         return payload
 
+    def manual_swipe(
+        self,
+        x1: float,
+        y1: float,
+        x2: float,
+        y2: float,
+        *,
+        duration_ms: int = 450,
+    ) -> dict[str, object]:
+        frame = self.source.latest_frame()
+        status = self.source.refresh_status()
+        device = status.get("device")
+        device = device if isinstance(device, dict) else {}
+        geometry = ScreenGeometry(
+            frame.width,
+            frame.height,
+            _positive_int(device.get("width"), frame.width),
+            _positive_int(device.get("height"), frame.height),
+            _rotation(device.get("rotation"), frame.rotation),
+        )
+        device_start = geometry.screen_to_device(x1, y1)
+        device_end = geometry.screen_to_device(x2, y2)
+        result = self.controller.swipe(
+            *device_start,
+            *device_end,
+            duration_ms=duration_ms,
+        )
+        self.ui_tree_provider.invalidate()
+        payload = {
+            "ok": True,
+            "device_id": self.device_id,
+            "screen": {"x1": x1, "y1": y1, "x2": x2, "y2": y2},
+            "device": {
+                "x1": device_start[0],
+                "y1": device_start[1],
+                "x2": device_end[0],
+                "y2": device_end[1],
+            },
+            "result": result.to_dict(),
+        }
+        self._remember_action(
+            {
+                "type": "manual_swipe",
+                "x1": device_start[0],
+                "y1": device_start[1],
+                "x2": device_end[0],
+                "y2": device_end[1],
+            },
+            result.to_dict(),
+        )
+        self.event_log.add(
+            "Manual Android swipe",
+            event_type="android.swipe.manual",
+            category="android",
+            status="success",
+            payload=payload,
+        )
+        return payload
+
+    def manual_gesture(self, gesture: PointerGesture) -> dict[str, object]:
+        frame = self.source.latest_frame()
+        status = self.source.refresh_status()
+        device = status.get("device")
+        device = device if isinstance(device, dict) else {}
+        geometry = ScreenGeometry(
+            frame.width,
+            frame.height,
+            _positive_int(device.get("width"), frame.width),
+            _positive_int(device.get("height"), frame.height),
+            _rotation(device.get("rotation"), frame.rotation),
+        )
+        try:
+            device_points = tuple(
+                PointerPoint(*geometry.screen_to_device(point.x, point.y), point.t_ms)
+                for point in gesture.points
+            )
+        except ValueError as error:
+            raise PointerGestureBoundsError(str(error)) from error
+        device_gesture = PointerGesture(
+            points=device_points,
+            started_at_ms=gesture.started_at_ms,
+            duration_ms=gesture.duration_ms,
+        )
+        result = self.controller.execute_gesture(device_gesture)
+        self.ui_tree_provider.invalidate()
+        payload = {
+            "ok": True,
+            "device_id": self.device_id,
+            "screen": gesture.to_dict(),
+            "device": device_gesture.to_dict(),
+            "result": result.to_dict(),
+        }
+        self._remember_action(
+            {"type": "pointer_gesture", **device_gesture.to_dict()},
+            result.to_dict(),
+        )
+        self.event_log.add(
+            f"Manual Android gesture: {len(device_points)} points",
+            event_type="android.gesture.manual",
+            category="android",
+            status="success",
+            payload=payload,
+        )
+        return payload
+
     def back(self) -> dict[str, object]:
         result = self.controller.back()
+        self.ui_tree_provider.invalidate()
         self._remember_action({"type": "back"}, result.to_dict())
         self._record_primitive("back", result.to_dict())
-        return {"ok": True, "result": result.to_dict()}
+        return {"ok": True, "device_id": self.device_id, "result": result.to_dict()}
 
     def home(self) -> dict[str, object]:
         result = self.controller.home()
+        self.ui_tree_provider.invalidate()
         self._remember_action({"type": "home"}, result.to_dict())
         self._record_primitive("home", result.to_dict())
-        return {"ok": True, "result": result.to_dict()}
+        return {"ok": True, "device_id": self.device_id, "result": result.to_dict()}
 
     def start_macro(self) -> dict[str, object]:
         with self._lock:
@@ -283,6 +467,9 @@ class AndroidDebugService:
             self._state_confidence = result.classification.confidence
             self._latest_vision = result.vision
             self._latest_frame_jpeg = encoded
+            if result.ui_tree is not None:
+                self._latest_ui_tree = result.ui_tree
+                self._ui_tree_error = None
             self._last_action = trace.decision
             self._last_action_result = trace.api_result
             self._blocked_reason = trace.error
@@ -305,7 +492,10 @@ class AndroidDebugService:
             vision = self._latest_vision
             trace_steps = tuple(self._macro.trace.steps)
             last_step = trace_steps[-1] if trace_steps else None
+            ui_tree = self._latest_ui_tree
             return {
+                "device_id": self.device_id,
+                "source_id": f"android:{self.device_id}",
                 "state": {
                     "current": self._current_state,
                     "previous": self._previous_state,
@@ -330,6 +520,14 @@ class AndroidDebugService:
                 "vision_latency_ms": (
                     None if vision is None else vision.ui_detection_ms
                 ),
+                "ui_tree": {
+                    "available": ui_tree is not None,
+                    "captured_at": None if ui_tree is None else ui_tree.captured_at,
+                    "package_name": None if ui_tree is None else ui_tree.package_name,
+                    "node_count": 0 if ui_tree is None else len(ui_tree.nodes),
+                    "truncated": False if ui_tree is None else ui_tree.truncated,
+                    "error": self._ui_tree_error,
+                },
                 "decision": {
                     "classifier": {
                         "state": self._current_state,
@@ -348,8 +546,18 @@ class AndroidDebugService:
     def stream(self):
         return self.client.iter_stream()
 
+    def close(self) -> None:
+        """Release this device without affecting any other registered device."""
+        with self._lock:
+            running = self._macro_status in {"RUNNING", "STEPPING", "PAUSED"}
+        if running:
+            self.stop_macro()
+        close_client = getattr(self.client, "close", None)
+        if callable(close_client):
+            close_client()
+
     def _new_macro_engine(self) -> MacroEngine:
-        return MacroEngine(
+        engine = MacroEngine(
             self.source,
             self.vision,
             self.classifier,
@@ -357,7 +565,12 @@ class AndroidDebugService:
             self.target_resolver,
             self.controller,
             artifact_dir=self.capture_dir / "macros" / self._macro_id / "frames",
+            ui_tree_provider=self.ui_tree_provider,
+            hybrid_target_resolver=self.hybrid_target_resolver,
+            ui_tree_state_classifier=self.ui_tree_state_classifier,
         )
+        engine.trace.device_id = self.device_id
+        return engine
 
     def _remember_action(
         self,
@@ -376,7 +589,7 @@ class AndroidDebugService:
             event_type=f"android.{command}",
             category="android",
             status="success",
-            payload=payload,
+            payload=self._event_payload(payload),
         )
 
     def _record_macro(
@@ -389,12 +602,30 @@ class AndroidDebugService:
         self.event_log.add(
             f"Android macro {action}",
             level=level,
-            event_type=f"macro.{action.replace(' ', '_')}",
+            event_type=f"android.macro.{action.replace(' ', '_')}",
             category="macro",
             status="error" if level == "error" else "success",
             trace_id=self._macro_id,
-            payload=payload,
+            payload=self._event_payload(payload),
         )
+
+    def _event_payload(
+        self,
+        payload: dict[str, object] | None = None,
+    ) -> dict[str, object]:
+        return {"device_id": self.device_id, **(payload or {})}
+
+    def _capture_ui_tree(self, *, max_age_ms: float) -> AndroidUiTree | None:
+        try:
+            tree = self.ui_tree_provider.snapshot(max_age_ms=max_age_ms)
+        except Exception as error:
+            with self._lock:
+                self._ui_tree_error = str(error)
+            return None
+        with self._lock:
+            self._latest_ui_tree = tree
+            self._ui_tree_error = None
+        return tree
 
 
 def _default_classifier() -> DetectionStateClassifier:
@@ -416,6 +647,36 @@ def _default_state_machine() -> MacroStateMachine:
             "confirmation": TapTargetAction("confirm_button"),
         },
         terminal_states=("verify_photo",),
+    )
+
+
+def _default_ui_selectors() -> dict[str, tuple[UiSelector, ...]]:
+    return {
+        "reservation_button": (
+            UiSelector(text_contains="예약", clickable=True),
+        ),
+        "verify_photo_button": (
+            UiSelector(text="사진 인증", clickable=True),
+        ),
+        "confirm_button": (
+            UiSelector(text="확인", clickable=True),
+        ),
+        "home_button": (
+            UiSelector(content_description="홈", clickable=True),
+            UiSelector(text="홈", clickable=True),
+        ),
+    }
+
+
+def _default_ui_state_classifier() -> AccessibilityStateClassifier:
+    selectors = _default_ui_selectors()
+    return AccessibilityStateClassifier(
+        (
+            AccessibilityStateRule("home", selectors["reservation_button"]),
+            AccessibilityStateRule("reservation", selectors["verify_photo_button"]),
+            AccessibilityStateRule("verify_photo", selectors["home_button"]),
+            AccessibilityStateRule("confirmation", selectors["confirm_button"]),
+        )
     )
 
 

@@ -3,6 +3,7 @@ package com.tapbot.agent.api
 import android.util.Log
 import com.tapbot.agent.accessibility.ActionExecutionResult
 import com.tapbot.agent.accessibility.ActionOutcome
+import com.tapbot.agent.accessibility.GesturePoint
 import com.tapbot.agent.accessibility.TapBotAccessibilityService
 import com.tapbot.agent.capture.CaptureNotReadyException
 import com.tapbot.agent.capture.ScreenCaptureProvider
@@ -26,7 +27,7 @@ import java.util.concurrent.atomic.AtomicBoolean
 
 class ControlServer(
     port: Int,
-    private val apiToken: String,
+    private val apiTokenProvider: () -> String,
     private val captureProvider: ScreenCaptureProvider,
 ) : NanoHTTPD(port), AutoCloseable {
     private val running = AtomicBoolean(false)
@@ -34,6 +35,7 @@ class ControlServer(
     private val requestIds = ThreadLocal<String>()
     private val tapRateLimiter = SlidingWindowRateLimiter(limit = 10)
     private val swipeRateLimiter = SlidingWindowRateLimiter(limit = 4)
+    private val gestureRateLimiter = SlidingWindowRateLimiter(limit = 4)
     private val globalActionRateLimiter = SlidingWindowRateLimiter(limit = 6)
 
     fun startServer() {
@@ -97,15 +99,11 @@ class ControlServer(
         session.method == Method.GET && session.uri in STREAM_STATUS_PATHS -> streamStatus()
         session.method == Method.POST && session.uri in TAP_PATHS -> tap(readJson(session))
         session.method == Method.POST && session.uri in SWIPE_PATHS -> swipe(readJson(session))
+        session.method == Method.POST && session.uri in GESTURE_PATHS -> gesture(readJson(session))
         session.method == Method.POST && session.uri in BACK_PATHS -> globalAction("back")
         session.method == Method.POST && session.uri in HOME_PATHS -> globalAction("home")
         session.method == Method.POST && session.uri in RECENTS_PATHS -> globalAction("recents")
-        session.method == Method.GET && session.uri in UI_TREE_PATHS ->
-            jsonError(
-                Response.Status.NOT_IMPLEMENTED,
-                "ui_tree_unavailable",
-                "UI tree export is optional and is not enabled in this build",
-            )
+        session.method == Method.GET && session.uri in UI_TREE_PATHS -> uiTree()
         session.uri.startsWith("/api/") ->
             jsonError(Response.Status.METHOD_NOT_ALLOWED, "method_not_allowed", "Unknown route or method")
         else -> jsonError(Response.Status.NOT_FOUND, "not_found", "Route not found")
@@ -220,6 +218,54 @@ class ControlServer(
         return actionResponse("swipe", service.swipe(x1, y1, x2, y2, duration))
     }
 
+    private fun gesture(payload: JSONObject): Response {
+        remoteControlDisabled()?.let { return it }
+        val rawPoints = try {
+            payload.getJSONArray("points")
+        } catch (error: JSONException) {
+            return jsonError(
+                Response.Status.BAD_REQUEST,
+                "invalid_gesture",
+                "points must be a JSON array",
+            )
+        }
+        if (rawPoints.length() > InputValidator.MAX_GESTURE_POINTS) {
+            return jsonError(
+                Response.Status.BAD_REQUEST,
+                "gesture_too_large",
+                "Gesture must not exceed ${InputValidator.MAX_GESTURE_POINTS} points",
+            )
+        }
+        val points = try {
+            (0 until rawPoints.length()).map { index ->
+                val point = rawPoints.getJSONObject(index)
+                GesturePoint(
+                    point.getDouble("x").toFloat(),
+                    point.getDouble("y").toFloat(),
+                    point.getLong("t_ms"),
+                )
+            }
+        } catch (error: JSONException) {
+            return jsonError(
+                Response.Status.BAD_REQUEST,
+                "invalid_gesture",
+                "Each gesture point requires numeric x, y, and integer t_ms",
+            )
+        }
+        val display = AgentStateStore.snapshot().display
+        InputValidator.gesture(points, display.logicalWidth, display.logicalHeight)?.let {
+            return jsonError(Response.Status.BAD_REQUEST, it.code, it.message)
+        }
+        val service = accessibilityService() ?: return accessibilityDisabled()
+        enforceRateLimit(gestureRateLimiter, "gesture")?.let { return it }
+        Log.i(
+            TAG,
+            "Input command: gesture request_id=${requestId()} " +
+                "points=${points.size} duration_ms=${points.last().tMs - points.first().tMs}",
+        )
+        return actionResponse("gesture", service.gesture(points))
+    }
+
     private fun globalAction(name: String): Response {
         remoteControlDisabled()?.let { return it }
         val service = accessibilityService() ?: return accessibilityDisabled()
@@ -232,6 +278,22 @@ class ControlServer(
         }
         Log.i(TAG, "Input command: $name request_id=${requestId()}")
         return actionResponse(name, result)
+    }
+
+    private fun uiTree(): Response {
+        val service = accessibilityService() ?: return accessibilityDisabled()
+        val snapshot = service.uiTreeSnapshot()
+            ?: return jsonError(
+                Response.Status.SERVICE_UNAVAILABLE,
+                "ui_tree_unavailable",
+                "No active accessibility root is available",
+            )
+        Log.i(
+            TAG,
+            "UI tree captured request_id=${requestId()} package=${snapshot.packageName} " +
+                "nodes=${snapshot.nodes.size} truncated=${snapshot.truncated}",
+        )
+        return json(Response.Status.OK, ApiModels.uiTree(requestId(), snapshot).toString())
     }
 
     private fun accessibilityService(): TapBotAccessibilityService? =
@@ -336,6 +398,7 @@ class ControlServer(
         val supplied = session.headers["authorization"]
             ?.removePrefix("Bearer ")
             ?.takeIf { it.length != session.headers["authorization"]?.length }
+        val apiToken = apiTokenProvider()
         if (
             supplied != null && MessageDigest.isEqual(
                 apiToken.toByteArray(StandardCharsets.UTF_8),
@@ -472,6 +535,11 @@ class ControlServer(
             "/api/swipe",
             "/api/v1/swipe",
             "/api/v1/input/swipe",
+        )
+        private val GESTURE_PATHS = setOf(
+            "/api/gesture",
+            "/api/v1/gesture",
+            "/api/v1/input/gesture",
         )
         private val BACK_PATHS = setOf("/api/back", "/api/v1/back", "/api/v1/input/back")
         private val HOME_PATHS = setOf("/api/home", "/api/v1/home", "/api/v1/input/home")

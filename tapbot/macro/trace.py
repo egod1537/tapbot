@@ -25,10 +25,12 @@ class MacroStepTrace:
     api_result: dict[str, Any] | None
     status: str
     error: str | None = None
+    ui_tree: dict[str, object] | None = None
 
 
 @dataclass(slots=True)
 class MacroTrace:
+    device_id: str | None = None
     started_at: str = field(default_factory=lambda: _now())
     completed_at: str | None = None
     steps: list[MacroStepTrace] = field(default_factory=list)
@@ -42,6 +44,7 @@ class MacroTrace:
     def to_dict(self) -> dict[str, object]:
         return {
             "schema_version": 1,
+            "device_id": self.device_id,
             "started_at": self.started_at,
             "completed_at": self.completed_at,
             "steps": [asdict(step) for step in self.steps],
@@ -73,6 +76,11 @@ class MacroTrace:
             values["detections"] = tuple(detections)
             steps.append(MacroStepTrace(**values))
         return cls(
+            device_id=(
+                None
+                if document.get("device_id") is None
+                else str(document["device_id"])
+            ),
             started_at=str(document.get("started_at", "")),
             completed_at=(
                 None

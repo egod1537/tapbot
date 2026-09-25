@@ -5,18 +5,27 @@ import {
   Card,
   Divider,
   Elevation,
+  HTMLSelect,
   Spinner,
   Tag,
 } from '@blueprintjs/core'
-import type { MouseEvent } from 'react'
-import { useMemo } from 'react'
-import type { AndroidDebugState } from '../../types/android-debug'
+import type { PointerEvent as ReactPointerEvent } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import type {
+  AndroidDebugState,
+  AndroidDeviceSummary,
+  AndroidPointerPoint,
+  AndroidUiBounds,
+} from '../../types/android-debug'
 import type { VisionDetection } from '../../types/vision'
 import { androidApi } from './android-api'
+import { appendSampledPoint, isTapPath, mapPointerToFrame } from './pointer-gesture'
 import type { AndroidDebugController } from './useAndroidDebug'
 
 interface AndroidDebugWorkspaceProps {
   controller: AndroidDebugController
+  devices: AndroidDeviceSummary[]
+  onDeviceChange: (deviceId: string) => void
 }
 
 interface AndroidOverlayProps {
@@ -26,6 +35,8 @@ interface AndroidOverlayProps {
   selectedId: string | null
   highlightedId: string | null
   plannedPoint: { x: number; y: number } | null
+  uiBounds: AndroidUiBounds | null
+  pointerPath: AndroidPointerPoint[]
 }
 
 function AndroidOverlay({
@@ -35,8 +46,12 @@ function AndroidOverlay({
   selectedId,
   highlightedId,
   plannedPoint,
+  uiBounds,
+  pointerPath,
 }: AndroidOverlayProps) {
   const scale = Math.max(width, height) / 900
+  const pointerStart = pointerPath[0]
+  const pointerEnd = pointerPath.at(-1)
   return (
     <svg
       className="android-screen-overlay"
@@ -84,6 +99,41 @@ function AndroidOverlay({
           />
         </g>
       )}
+      {uiBounds && (
+        <g className="android-ui-node-box">
+          <rect
+            x={uiBounds.left}
+            y={uiBounds.top}
+            width={uiBounds.right - uiBounds.left}
+            height={uiBounds.bottom - uiBounds.top}
+            vectorEffect="non-scaling-stroke"
+          />
+        </g>
+      )}
+      {pointerStart && pointerEnd && (
+        <g className="android-pointer-path">
+          {pointerPath.length > 1 && (
+            <polyline
+              points={pointerPath.map((point) => `${point.x},${point.y}`).join(' ')}
+              vectorEffect="non-scaling-stroke"
+            />
+          )}
+          <circle
+            className="android-pointer-path__start"
+            cx={pointerStart.x}
+            cy={pointerStart.y}
+            r={Math.max(7 * scale, 4)}
+            vectorEffect="non-scaling-stroke"
+          />
+          <circle
+            className="android-pointer-path__current"
+            cx={pointerEnd.x}
+            cy={pointerEnd.y}
+            r={Math.max(9 * scale, 5)}
+            vectorEffect="non-scaling-stroke"
+          />
+        </g>
+      )}
     </svg>
   )
 }
@@ -100,7 +150,11 @@ function macroIntent(status: string | undefined) {
   return 'none' as const
 }
 
-export function AndroidDebugWorkspace({ controller }: AndroidDebugWorkspaceProps) {
+export function AndroidDebugWorkspace({
+  controller,
+  devices,
+  onDeviceChange,
+}: AndroidDebugWorkspaceProps) {
   const { status, debug } = controller
   const frameWidth =
     debug?.frame?.width ?? status?.stream?.width ?? status?.agent?.device.width ?? 0
@@ -113,8 +167,11 @@ export function AndroidDebugWorkspace({ controller }: AndroidDebugWorkspaceProps
   )
   const useStream = Boolean(status?.stream?.running && !controller.streamFailed)
   const imageSource = useStream
-    ? androidApi.streamUrl(controller.streamNonce)
-    : androidApi.screenshotUrl(debug?.frame?.frame_id ?? controller.streamNonce)
+    ? androidApi.streamUrl(controller.deviceId ?? '', controller.streamNonce)
+    : androidApi.screenshotUrl(
+        controller.deviceId ?? '',
+        debug?.frame?.frame_id ?? controller.streamNonce,
+      )
   const plannedPoint = debug?.decision.target?.screen ?? null
   const selected = useMemo(
     () =>
@@ -123,26 +180,135 @@ export function AndroidDebugWorkspace({ controller }: AndroidDebugWorkspaceProps
       ) ?? null,
     [controller.selectedDetectionId, debug?.detections],
   )
+  const selectedUiNode = useMemo(
+    () =>
+      controller.uiTree?.nodes.find(
+        (node) => node.node_id === controller.selectedUiNodeId,
+      ) ?? null,
+    [controller.selectedUiNodeId, controller.uiTree?.nodes],
+  )
+  const selectedUiBounds =
+    controller.uiTree?.screen_width === frameWidth &&
+    controller.uiTree.screen_height === frameHeight
+      ? (selectedUiNode?.bounds ?? null)
+      : null
+  const [recordingPath, setRecordingPath] = useState<AndroidPointerPoint[]>([])
+  const [recentPath, setRecentPath] = useState<AndroidPointerPoint[]>([])
+  const activePointer = useRef<{
+    id: number
+    startedAt: number
+    points: AndroidPointerPoint[]
+  } | null>(null)
+  const recentPathTimer = useRef<number | null>(null)
 
-  const handleScreenClick = (event: MouseEvent<HTMLDivElement>) => {
-    if (
-      !controller.manualTapEnabled ||
-      !canControl ||
-      frameWidth <= 0 ||
-      frameHeight <= 0
-    ) {
+  const cancelPointerRecording = useCallback(() => {
+    activePointer.current = null
+    setRecordingPath([])
+  }, [])
+
+  useEffect(() => {
+    activePointer.current = null
+    const reset = window.setTimeout(() => {
+      setRecordingPath([])
+      setRecentPath([])
+    }, 0)
+    return () => window.clearTimeout(reset)
+  }, [controller.deviceId])
+
+  useEffect(() => {
+    if (!controller.manualTapEnabled || !status?.connected || controller.streamFailed) {
+      activePointer.current = null
+      const reset = window.setTimeout(() => setRecordingPath([]), 0)
+      return () => window.clearTimeout(reset)
+    }
+    return undefined
+  }, [controller.manualTapEnabled, controller.streamFailed, status?.connected])
+
+  useEffect(
+    () => () => {
+      if (recentPathTimer.current !== null) {
+        window.clearTimeout(recentPathTimer.current)
+      }
+    },
+    [],
+  )
+
+  const eventPoint = (
+    event: ReactPointerEvent<HTMLDivElement>,
+  ): { x: number; y: number } | null =>
+    mapPointerToFrame(
+      event.clientX,
+      event.clientY,
+      event.currentTarget.getBoundingClientRect(),
+      frameWidth,
+      frameHeight,
+    )
+
+  const handlePointerDown = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if (!controller.manualTapEnabled || !canControl || event.button !== 0) return
+    const point = eventPoint(event)
+    if (!point) return
+    event.preventDefault()
+    event.currentTarget.setPointerCapture?.(event.pointerId)
+    const first = { ...point, t_ms: 0 }
+    activePointer.current = {
+      id: event.pointerId,
+      startedAt: performance.now(),
+      points: [first],
+    }
+    setRecordingPath([first])
+  }
+
+  const handlePointerMove = (event: ReactPointerEvent<HTMLDivElement>) => {
+    const active = activePointer.current
+    if (!active || active.id !== event.pointerId) return
+    const point = eventPoint(event)
+    if (!point) return
+    event.preventDefault()
+    const sampled = appendSampledPoint(active.points, {
+      ...point,
+      t_ms: Math.max(0, Math.round(performance.now() - active.startedAt)),
+    })
+    if (sampled !== active.points) {
+      active.points = sampled
+      setRecordingPath(sampled)
+    }
+  }
+
+  const handlePointerUp = (event: ReactPointerEvent<HTMLDivElement>) => {
+    const active = activePointer.current
+    if (!active || active.id !== event.pointerId) return
+    event.preventDefault()
+    const fallback = active.points.at(-1)
+    if (!fallback) {
+      cancelPointerRecording()
       return
     }
-    const bounds = event.currentTarget.getBoundingClientRect()
-    const scale = Math.min(bounds.width / frameWidth, bounds.height / frameHeight)
-    const renderedWidth = frameWidth * scale
-    const renderedHeight = frameHeight * scale
-    const offsetX = (bounds.width - renderedWidth) / 2
-    const offsetY = (bounds.height - renderedHeight) / 2
-    const x = (event.clientX - bounds.left - offsetX) / scale
-    const y = (event.clientY - bounds.top - offsetY) / scale
-    if (x < 0 || y < 0 || x >= frameWidth || y >= frameHeight) return
-    void controller.tap(x, y)
+    const mapped = eventPoint(event) ?? fallback
+    const elapsed = Math.max(1, Math.round(performance.now() - active.startedAt))
+    const completed = appendSampledPoint(
+      active.points,
+      { x: mapped.x, y: mapped.y, t_ms: elapsed },
+      { force: true },
+    )
+    activePointer.current = null
+    setRecordingPath([])
+    setRecentPath(completed)
+    if (recentPathTimer.current !== null) window.clearTimeout(recentPathTimer.current)
+    recentPathTimer.current = window.setTimeout(() => setRecentPath([]), 900)
+    const first = completed[0]
+    if (!first) return
+    if (isTapPath(completed)) {
+      void controller.tap(first.x, first.y)
+    } else {
+      void controller.gesture(completed)
+    }
+  }
+
+  const handlePointerCancel = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if (activePointer.current?.id !== event.pointerId) return
+    event.preventDefault()
+    cancelPointerRecording()
   }
 
   return (
@@ -152,6 +318,23 @@ export function AndroidDebugWorkspace({ controller }: AndroidDebugWorkspaceProps
           <span>PC-controlled canonical screen</span>
           <h1 id="android-debug-title">Android Remote Debug</h1>
         </div>
+        <label className="android-device-select">
+          <span>Android Device</span>
+          <HTMLSelect
+            aria-label="Android Device"
+            value={controller.deviceId ?? ''}
+            disabled={devices.length === 0}
+            onChange={(event) => onDeviceChange(event.currentTarget.value)}
+          >
+            {devices.length === 0 && <option value="">No devices configured</option>}
+            {devices.map((device) => (
+              <option key={device.id} value={device.id}>
+                {device.name} · {device.connected ? 'ONLINE' : 'OFFLINE'} ·{' '}
+                {device.stream_running ? 'LIVE' : 'OFF'} · {device.macro_status}
+              </option>
+            ))}
+          </HTMLSelect>
+        </label>
         <div className="android-debug-heading__tags">
           <Tag intent={status?.connected ? 'success' : 'danger'} minimal>
             Android {status?.connected ? 'ONLINE' : 'OFFLINE'}
@@ -205,7 +388,11 @@ export function AndroidDebugWorkspace({ controller }: AndroidDebugWorkspaceProps
                   }
                 : undefined
             }
-            onClick={handleScreenClick}
+            onPointerDown={handlePointerDown}
+            onPointerMove={handlePointerMove}
+            onPointerUp={handlePointerUp}
+            onPointerCancel={handlePointerCancel}
+            onContextMenu={(event) => event.preventDefault()}
             role={controller.manualTapEnabled ? 'button' : undefined}
             tabIndex={controller.manualTapEnabled ? 0 : undefined}
           >
@@ -226,6 +413,8 @@ export function AndroidDebugWorkspace({ controller }: AndroidDebugWorkspaceProps
                     selectedId={controller.selectedDetectionId}
                     highlightedId={controller.highlightedDetectionId}
                     plannedPoint={plannedPoint}
+                    uiBounds={selectedUiBounds}
+                    pointerPath={recordingPath.length > 0 ? recordingPath : recentPath}
                   />
                 )}
                 <div className="android-live-badges">
@@ -233,7 +422,7 @@ export function AndroidDebugWorkspace({ controller }: AndroidDebugWorkspaceProps
                     {useStream ? 'MJPEG LIVE' : 'SCREENSHOT FALLBACK'}
                   </Tag>
                   {controller.manualTapEnabled && (
-                    <Tag intent="warning">TAP MODE ACTIVE</Tag>
+                    <Tag intent="warning">MANUAL CONTROL ACTIVE</Tag>
                   )}
                 </div>
               </>
@@ -253,7 +442,9 @@ export function AndroidDebugWorkspace({ controller }: AndroidDebugWorkspaceProps
               active={controller.manualTapEnabled}
               intent={controller.manualTapEnabled ? 'warning' : 'none'}
               icon="hand"
-              text={controller.manualTapEnabled ? 'Tap Mode On' : 'Tap Mode'}
+              text={
+                controller.manualTapEnabled ? 'Manual Control On' : 'Manual Control'
+              }
               disabled={!canControl}
               onClick={() =>
                 controller.setManualTapEnabled(!controller.manualTapEnabled)
@@ -420,6 +611,8 @@ export function AndroidDebugWorkspace({ controller }: AndroidDebugWorkspaceProps
           )}
         </Card>
 
+        <UiTreeCard controller={controller} />
+
         <Card className="android-event-card" elevation={Elevation.ONE}>
           <header className="android-card-heading">
             <div>
@@ -451,6 +644,110 @@ export function AndroidDebugWorkspace({ controller }: AndroidDebugWorkspaceProps
         </Card>
       </div>
     </section>
+  )
+}
+
+function UiTreeCard({ controller }: { controller: AndroidDebugController }) {
+  const [query, setQuery] = useState('')
+  const normalized = query.trim().toLocaleLowerCase()
+  const nodes = useMemo(
+    () =>
+      (controller.uiTree?.nodes ?? [])
+        .filter((node) => {
+          if (!normalized) return node.visible_to_user && node.enabled
+          return [node.text, node.content_description, node.view_id_resource_name]
+            .filter((value): value is string => Boolean(value))
+            .some((value) => value.toLocaleLowerCase().includes(normalized))
+        })
+        .slice(0, 100),
+    [controller.uiTree?.nodes, normalized],
+  )
+  const selected = controller.uiTree?.nodes.find(
+    (node) => node.node_id === controller.selectedUiNodeId,
+  )
+
+  return (
+    <Card className="android-ui-tree-card" elevation={Elevation.ONE}>
+      <header className="android-card-heading">
+        <div>
+          <span>Accessibility</span>
+          <strong>UI Tree</strong>
+        </div>
+        <div>
+          <Tag intent={controller.uiTree ? 'success' : 'warning'} minimal>
+            {controller.uiTree?.package_name ?? 'Unavailable'}
+          </Tag>
+          <Tag minimal>{controller.uiTree?.node_count ?? 0} nodes</Tag>
+          {controller.uiTree?.truncated && <Tag intent="warning">TRUNCATED</Tag>}
+        </div>
+      </header>
+      <div className="android-ui-tree-search">
+        <input
+          aria-label="Search UI tree"
+          value={query}
+          placeholder="Search text, content description, or view id"
+          onChange={(event) => setQuery(event.currentTarget.value)}
+        />
+        {controller.uiTreeError && <span>{controller.uiTreeError}</span>}
+      </div>
+      <div className="android-ui-tree-layout">
+        <div className="android-ui-node-list">
+          {nodes.map((node) => (
+            <Button
+              key={node.node_id}
+              minimal
+              fill
+              alignText="left"
+              active={node.node_id === controller.selectedUiNodeId}
+              onClick={() => controller.setSelectedUiNodeId(node.node_id)}
+            >
+              <span>
+                <strong>
+                  {node.text ?? node.content_description ?? node.class_name}
+                </strong>
+                <small>{node.view_id_resource_name ?? node.node_id}</small>
+              </span>
+              {node.clickable && <Tag minimal>clickable</Tag>}
+            </Button>
+          ))}
+          {!nodes.length && <div className="android-panel-empty">No UI nodes.</div>}
+        </div>
+        <dl className="android-ui-node-detail">
+          <div>
+            <dt>Captured</dt>
+            <dd>{controller.uiTree?.captured_at ?? '—'}</dd>
+          </div>
+          <div>
+            <dt>Node</dt>
+            <dd>{selected?.node_id ?? '—'}</dd>
+          </div>
+          <div>
+            <dt>Text</dt>
+            <dd>{selected?.text ?? '—'}</dd>
+          </div>
+          <div>
+            <dt>Class</dt>
+            <dd>{selected?.class_name ?? '—'}</dd>
+          </div>
+          <div>
+            <dt>View ID</dt>
+            <dd>{selected?.view_id_resource_name ?? '—'}</dd>
+          </div>
+          <div>
+            <dt>Bounds</dt>
+            <dd>
+              {selected
+                ? `${selected.bounds.left},${selected.bounds.top} → ${selected.bounds.right},${selected.bounds.bottom}`
+                : '—'}
+            </dd>
+          </div>
+          <div>
+            <dt>Clickable</dt>
+            <dd>{selected?.clickable ? 'Yes' : 'No'}</dd>
+          </div>
+        </dl>
+      </div>
+    </Card>
   )
 }
 

@@ -30,6 +30,16 @@ from tapbot.android.client import (
     AndroidAgentClient,
     AndroidAgentTransportError,
 )
+from tapbot.android.registry import (
+    AndroidDeviceConfig,
+    AndroidDeviceRegistry,
+    registry_from_environment,
+)
+from tapbot.device.gesture import (
+    PointerGesture,
+    PointerGestureBoundsError,
+    PointerPoint,
+)
 from tapbot.camera.manager import CameraManager, CameraSourceNotFoundError
 from tapbot.camera.mock_graph import MockGraphStateError
 from tapbot.camera.source import CameraError, CameraSource
@@ -117,6 +127,39 @@ class AndroidTapRequest:
 
 
 @dataclass(frozen=True, slots=True)
+class AndroidSwipeRequest:
+    x1: float
+    y1: float
+    x2: float
+    y2: float
+    duration_ms: int = 450
+
+
+@dataclass(frozen=True, slots=True)
+class AndroidPointerPointRequest:
+    x: float
+    y: float
+    t_ms: int
+
+
+@dataclass(frozen=True, slots=True)
+class AndroidGestureRequest:
+    points: list[AndroidPointerPointRequest]
+
+
+def _pointer_gesture(payload: AndroidGestureRequest) -> PointerGesture:
+    try:
+        return PointerGesture.from_points(
+            tuple(
+                PointerPoint(point.x, point.y, point.t_ms)
+                for point in payload.points
+            )
+        )
+    except (TypeError, ValueError) as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
+
+
+@dataclass(frozen=True, slots=True)
 class CameraSourceSelectionRequest:
     source_id: str
 
@@ -194,6 +237,7 @@ def create_app(
     decision_policy: DecisionPolicy | None = None,
     android_client: AndroidAgentClient | None = None,
     android_debug_service: AndroidDebugService | None = None,
+    android_registry: AndroidDeviceRegistry | None = None,
     android_capture_dir: str | Path | None = None,
 ) -> FastAPI:
     robot = robot or MockRobotController()
@@ -205,10 +249,12 @@ def create_app(
         camera = camera_manager
     assert camera is not None
     bounds = bounds or WorkspaceBounds()
-    event_log = EventLog()
+    event_log = android_registry.event_log if android_registry is not None else EventLog()
     android_mode_requested = (
         android_client is not None
         or android_debug_service is not None
+        or android_registry is not None
+        or bool(os.getenv("TAPBOT_ANDROID_DEVICES_CONFIG", "").strip())
         or bool(os.getenv("TAPBOT_ANDROID_AGENT_URL", "").strip())
         and bool(os.getenv("TAPBOT_ANDROID_AGENT_TOKEN", "").strip())
     )
@@ -259,27 +305,62 @@ def create_app(
     camera_worker = CameraFrameWorker(camera, event_log, fps=camera_fps)
     calibration_store = calibration_store or CalibrationStore("tapbot-calibrations.json")
     vision_detectors = tuple(vision_detectors or (ColorButtonDetector(),))
-    if android_client is not None and android_debug_service is not None:
-        raise ValueError("Provide android_client or android_debug_service, not both")
-    if android_debug_service is None:
-        if android_client is None:
-            android_url = os.getenv("TAPBOT_ANDROID_AGENT_URL", "").strip()
-            android_token = os.getenv("TAPBOT_ANDROID_AGENT_TOKEN", "").strip()
-            if android_url and android_token:
-                android_client = AndroidAgentClient(android_url, android_token)
+    supplied_android = sum(
+        value is not None
+        for value in (android_client, android_debug_service, android_registry)
+    )
+    if supplied_android > 1:
+        raise ValueError(
+            "Provide only one of android_client, android_debug_service, or "
+            "android_registry"
+        )
+    android_capture_root = android_capture_dir or os.getenv(
+        "TAPBOT_ANDROID_CAPTURE_DIR",
+        "tapbot-captures/android",
+    )
+    if android_registry is None:
+        android_registry = AndroidDeviceRegistry(
+            vision_detectors,
+            event_log,
+            capture_dir=android_capture_root,
+        )
         if android_client is not None:
-            android_debug_service = AndroidDebugService(
-                android_client,
+            android_registry.register(
+                AndroidDeviceConfig(
+                    "default",
+                    "Android Device",
+                    getattr(android_client, "base_url", "injected://android"),
+                    "injected",
+                ),
+                client=android_client,
+            )
+        elif android_debug_service is not None:
+            android_registry.register(
+                AndroidDeviceConfig(
+                    android_debug_service.device_id,
+                    android_debug_service.device_name,
+                    getattr(
+                        android_debug_service.client,
+                        "base_url",
+                        "injected://android",
+                    ),
+                    "injected",
+                ),
+                client=android_debug_service.client,
+                debug_service=android_debug_service,
+            )
+        else:
+            android_registry = registry_from_environment(
                 vision_detectors,
                 event_log,
-                capture_dir=(
-                    android_capture_dir
-                    or os.getenv(
-                        "TAPBOT_ANDROID_CAPTURE_DIR",
-                        "tapbot-captures/android",
-                    )
-                ),
+                capture_dir=android_capture_root,
             )
+    default_android_id = android_registry.default_device_id
+    android_debug_service = (
+        None
+        if default_android_id is None
+        else android_registry.get(default_android_id).debug_service
+    )
     if phone_object_detector is None:
         phone_object_detector = default_phone_object_detector()
 
@@ -356,6 +437,18 @@ def create_app(
         finally:
             if simulation_bridge is not None:
                 simulation_bridge.close()
+            for context in android_registry.list():
+                try:
+                    context.debug_service.close()
+                except Exception as error:
+                    event_log.add(
+                        f"Android device close error ({context.config.id}): {error}",
+                        level="error",
+                        event_type="android.device.close_error",
+                        category="android",
+                        status="error",
+                        payload={"device_id": context.config.id},
+                    )
             screen_pipeline_worker.stop()
             camera_worker.stop()
             dispatcher.shutdown()
@@ -403,6 +496,7 @@ def create_app(
     application.state.decision_policy = decision_policy
     application.state.simulation_bridge = simulation_bridge
     application.state.android_debug_service = android_debug_service
+    application.state.android_registry = android_registry
     robot_state_lock = Lock()
     robot_state: dict[str, object] = {
         "x": 0.0,
@@ -440,6 +534,12 @@ def create_app(
     @application.get("/api/status")
     async def status() -> dict[str, object]:
         snapshot = camera_worker.latest_frame()
+        current_default_android_id = android_registry.default_device_id
+        current_default_android = (
+            None
+            if current_default_android_id is None
+            else android_registry.get(current_default_android_id).debug_service
+        )
         source_id = getattr(
             camera, "id", getattr(camera, "source", type(camera).__name__)
         )
@@ -465,26 +565,39 @@ def create_app(
             "vision_detectors": [
                 type(detector).__name__ for detector in vision_detectors
             ],
-            "android_configured": android_debug_service is not None,
+            "android_configured": bool(android_registry.list()),
             "android_macro_status": (
                 None
-                if android_debug_service is None
-                else android_debug_service.macro_status
+                if current_default_android is None
+                else current_default_android.macro_status
             ),
         }
 
-    def require_android_debug() -> AndroidDebugService:
-        if android_debug_service is None:
+    def require_android_debug(device_id: str | None = None) -> AndroidDebugService:
+        resolved_id = device_id or android_registry.default_device_id
+        if resolved_id is None:
+            if android_registry.list():
+                raise HTTPException(
+                    status_code=409,
+                    detail="No default Android device is configured; specify device_id.",
+                )
             raise HTTPException(
                 status_code=503,
                 detail=(
-                    "Android Agent is not configured. Set "
-                    "TAPBOT_ANDROID_AGENT_URL and TAPBOT_ANDROID_AGENT_TOKEN."
+                    "Android Agent is not configured. Set TAPBOT_ANDROID_DEVICES_CONFIG "
+                    "or TAPBOT_ANDROID_AGENT_URL and TAPBOT_ANDROID_AGENT_TOKEN."
                 ),
             )
-        return android_debug_service
+        try:
+            return android_registry.get(resolved_id).debug_service
+        except KeyError as error:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Unknown Android device: {resolved_id}",
+            ) from error
 
-    async def call_android(operation):
+    async def call_android(operation, *, device_id: str | None = None):
+        event_payload = {} if device_id is None else {"device_id": device_id}
         try:
             return await asyncio.to_thread(operation)
         except AndroidAgentApiError as error:
@@ -494,7 +607,11 @@ def create_app(
                 event_type="android.api.error",
                 category="android",
                 status="error",
-                payload={"code": error.code, "request_id": error.request_id},
+                payload={
+                    **event_payload,
+                    "code": error.code,
+                    "request_id": error.request_id,
+                },
             )
             raise HTTPException(
                 status_code=error.status or 502,
@@ -507,9 +624,17 @@ def create_app(
                 event_type="android.transport.error",
                 category="android",
                 status="error",
-                payload={"outcome_unknown": error.outcome_unknown},
+                payload={
+                    **event_payload,
+                    "outcome_unknown": error.outcome_unknown,
+                },
             )
             raise HTTPException(status_code=502, detail=str(error)) from error
+        except PointerGestureBoundsError as error:
+            raise HTTPException(
+                status_code=422,
+                detail=f"point_out_of_bounds: {error}",
+            ) from error
         except (OSError, ValueError, RuntimeError) as error:
             event_log.add(
                 f"Android debug operation failed: {error}",
@@ -517,6 +642,7 @@ def create_app(
                 event_type="android.operation.error",
                 category="android",
                 status="error",
+                payload=event_payload,
             )
             raise HTTPException(status_code=500, detail=str(error)) from error
 
@@ -536,30 +662,44 @@ def create_app(
 
     @application.get("/api/android/status")
     async def android_status() -> dict[str, object]:
-        if android_debug_service is None:
+        current_default_id = android_registry.default_device_id
+        if current_default_id is None:
             return {
-                "configured": False,
+                "configured": bool(android_registry.list()),
                 "connected": False,
                 "error": (
-                    "Set TAPBOT_ANDROID_AGENT_URL and "
-                    "TAPBOT_ANDROID_AGENT_TOKEN to connect."
+                    "Select a device-specific endpoint."
+                    if android_registry.list()
+                    else "Set TAPBOT_ANDROID_DEVICES_CONFIG or the legacy "
+                    "TAPBOT_ANDROID_AGENT_URL and TAPBOT_ANDROID_AGENT_TOKEN."
                 ),
                 "agent": None,
                 "stream": None,
                 "macro_status": "IDLE",
             }
-        return await call_android(android_debug_service.status)
+        current_default_service = android_registry.get(
+            current_default_id
+        ).debug_service
+        return await call_android(
+            current_default_service.status,
+            device_id=current_default_service.device_id,
+        )
 
     @application.get("/api/android/screenshot")
     async def android_screenshot() -> Response:
         service = require_android_debug()
-        frame = await call_android(service.screenshot)
+        frame = await call_android(service.screenshot, device_id=service.device_id)
         return android_frame_response(frame)
+
+    @application.get("/api/android/ui-tree")
+    async def android_ui_tree() -> dict[str, object]:
+        service = require_android_debug()
+        return await call_android(service.ui_tree, device_id=service.device_id)
 
     @application.post("/api/android/screenshot/save")
     async def android_save_screenshot() -> dict[str, object]:
         service = require_android_debug()
-        return await call_android(service.save_screenshot)
+        return await call_android(service.save_screenshot, device_id=service.device_id)
 
     @application.get("/api/android/stream")
     async def android_stream() -> StreamingResponse:
@@ -583,28 +723,60 @@ def create_app(
                 payload.x,
                 payload.y,
                 duration_ms=payload.duration_ms,
+            ),
+            device_id=service.device_id,
+        )
+
+    @application.post("/api/android/gesture")
+    async def android_gesture(payload: AndroidGestureRequest) -> dict[str, object]:
+        service = require_android_debug()
+        gesture = _pointer_gesture(payload)
+        return await call_android(
+            lambda: service.manual_gesture(gesture),
+            device_id=service.device_id,
+        )
+
+    @application.post("/api/android/swipe")
+    async def android_swipe(payload: AndroidSwipeRequest) -> dict[str, object]:
+        if payload.duration_ms < 1 or payload.duration_ms > 10_000:
+            raise HTTPException(
+                status_code=422,
+                detail="duration_ms must be between 1 and 10000",
             )
+        service = require_android_debug()
+        return await call_android(
+            lambda: service.manual_swipe(
+                payload.x1,
+                payload.y1,
+                payload.x2,
+                payload.y2,
+                duration_ms=payload.duration_ms,
+            ),
+            device_id=service.device_id,
         )
 
     @application.post("/api/android/back")
     async def android_back() -> dict[str, object]:
         service = require_android_debug()
-        return await call_android(service.back)
+        return await call_android(service.back, device_id=service.device_id)
 
     @application.post("/api/android/home")
     async def android_home() -> dict[str, object]:
         service = require_android_debug()
-        return await call_android(service.home)
+        return await call_android(service.home, device_id=service.device_id)
 
     @application.post("/api/android/vision/run")
     async def android_run_vision() -> dict[str, object]:
         service = require_android_debug()
-        return await call_android(service.run_vision)
+        return await call_android(service.run_vision, device_id=service.device_id)
 
     @application.get("/api/android/vision/frame")
     async def android_vision_frame() -> Response:
         service = require_android_debug()
-        frame = await call_android(service.latest_vision_frame)
+        frame = await call_android(
+            service.latest_vision_frame,
+            device_id=service.device_id,
+        )
         if frame is None:
             raise HTTPException(status_code=404, detail="No Android vision frame yet")
         return android_frame_response(frame)
@@ -612,32 +784,177 @@ def create_app(
     @application.get("/api/android/debug/state")
     async def android_debug_state() -> dict[str, object]:
         service = require_android_debug()
-        return await call_android(service.debug_state)
+        return await call_android(service.debug_state, device_id=service.device_id)
 
     @application.post("/api/android/macro/start")
     async def android_macro_start() -> dict[str, object]:
         service = require_android_debug()
-        return await call_android(service.start_macro)
+        return await call_android(service.start_macro, device_id=service.device_id)
 
     @application.post("/api/android/macro/pause")
     async def android_macro_pause() -> dict[str, object]:
         service = require_android_debug()
-        return await call_android(service.pause_macro)
+        return await call_android(service.pause_macro, device_id=service.device_id)
 
     @application.post("/api/android/macro/stop")
     async def android_macro_stop() -> dict[str, object]:
         service = require_android_debug()
-        return await call_android(service.stop_macro)
+        return await call_android(service.stop_macro, device_id=service.device_id)
 
     @application.post("/api/android/macro/reset")
     async def android_macro_reset() -> dict[str, object]:
         service = require_android_debug()
-        return await call_android(service.reset_macro)
+        return await call_android(service.reset_macro, device_id=service.device_id)
 
     @application.post("/api/android/macro/step")
     async def android_macro_step() -> dict[str, object]:
         service = require_android_debug()
-        return await call_android(service.step_macro)
+        return await call_android(service.step_macro, device_id=service.device_id)
+
+    @application.get("/api/android/devices")
+    async def android_devices() -> dict[str, object]:
+        devices = await asyncio.to_thread(android_registry.refresh_all)
+        return {
+            "devices": devices,
+            "default_device_id": android_registry.default_device_id,
+        }
+
+    @application.get("/api/android/{device_id}/status")
+    async def android_device_status(device_id: str) -> dict[str, object]:
+        service = require_android_debug(device_id)
+        return await call_android(service.status, device_id=device_id)
+
+    @application.get("/api/android/{device_id}/screenshot")
+    async def android_device_screenshot(device_id: str) -> Response:
+        service = require_android_debug(device_id)
+        frame = await call_android(service.screenshot, device_id=device_id)
+        return android_frame_response(frame)
+
+    @application.get("/api/android/{device_id}/ui-tree")
+    async def android_device_ui_tree(device_id: str) -> dict[str, object]:
+        service = require_android_debug(device_id)
+        return await call_android(service.ui_tree, device_id=device_id)
+
+    @application.post("/api/android/{device_id}/screenshot/save")
+    async def android_device_save_screenshot(device_id: str) -> dict[str, object]:
+        service = require_android_debug(device_id)
+        return await call_android(service.save_screenshot, device_id=device_id)
+
+    @application.get("/api/android/{device_id}/stream")
+    async def android_device_stream(device_id: str) -> StreamingResponse:
+        service = require_android_debug(device_id)
+        return StreamingResponse(
+            service.stream(),
+            media_type="multipart/x-mixed-replace; boundary=tapbotframe",
+            headers={"Cache-Control": "no-store"},
+        )
+
+    @application.post("/api/android/{device_id}/tap")
+    async def android_device_tap(
+        device_id: str,
+        payload: AndroidTapRequest,
+    ) -> dict[str, object]:
+        if payload.duration_ms < 1 or payload.duration_ms > 10_000:
+            raise HTTPException(
+                status_code=422,
+                detail="duration_ms must be between 1 and 10000",
+            )
+        service = require_android_debug(device_id)
+        return await call_android(
+            lambda: service.manual_tap(
+                payload.x,
+                payload.y,
+                duration_ms=payload.duration_ms,
+            ),
+            device_id=device_id,
+        )
+
+    @application.post("/api/android/{device_id}/swipe")
+    async def android_device_swipe(
+        device_id: str,
+        payload: AndroidSwipeRequest,
+    ) -> dict[str, object]:
+        if payload.duration_ms < 1 or payload.duration_ms > 10_000:
+            raise HTTPException(
+                status_code=422,
+                detail="duration_ms must be between 1 and 10000",
+            )
+        service = require_android_debug(device_id)
+        return await call_android(
+            lambda: service.manual_swipe(
+                payload.x1,
+                payload.y1,
+                payload.x2,
+                payload.y2,
+                duration_ms=payload.duration_ms,
+            ),
+            device_id=device_id,
+        )
+
+    @application.post("/api/android/{device_id}/gesture")
+    async def android_device_gesture(
+        device_id: str,
+        payload: AndroidGestureRequest,
+    ) -> dict[str, object]:
+        service = require_android_debug(device_id)
+        gesture = _pointer_gesture(payload)
+        return await call_android(
+            lambda: service.manual_gesture(gesture),
+            device_id=device_id,
+        )
+
+    @application.post("/api/android/{device_id}/back")
+    async def android_device_back(device_id: str) -> dict[str, object]:
+        service = require_android_debug(device_id)
+        return await call_android(service.back, device_id=device_id)
+
+    @application.post("/api/android/{device_id}/home")
+    async def android_device_home(device_id: str) -> dict[str, object]:
+        service = require_android_debug(device_id)
+        return await call_android(service.home, device_id=device_id)
+
+    @application.post("/api/android/{device_id}/vision/run")
+    async def android_device_run_vision(device_id: str) -> dict[str, object]:
+        service = require_android_debug(device_id)
+        return await call_android(service.run_vision, device_id=device_id)
+
+    @application.get("/api/android/{device_id}/vision/frame")
+    async def android_device_vision_frame(device_id: str) -> Response:
+        service = require_android_debug(device_id)
+        frame = await call_android(service.latest_vision_frame, device_id=device_id)
+        if frame is None:
+            raise HTTPException(status_code=404, detail="No Android vision frame yet")
+        return android_frame_response(frame)
+
+    @application.get("/api/android/{device_id}/debug/state")
+    async def android_device_debug_state(device_id: str) -> dict[str, object]:
+        service = require_android_debug(device_id)
+        return await call_android(service.debug_state, device_id=device_id)
+
+    @application.post("/api/android/{device_id}/macro/start")
+    async def android_device_macro_start(device_id: str) -> dict[str, object]:
+        service = require_android_debug(device_id)
+        return await call_android(service.start_macro, device_id=device_id)
+
+    @application.post("/api/android/{device_id}/macro/pause")
+    async def android_device_macro_pause(device_id: str) -> dict[str, object]:
+        service = require_android_debug(device_id)
+        return await call_android(service.pause_macro, device_id=device_id)
+
+    @application.post("/api/android/{device_id}/macro/stop")
+    async def android_device_macro_stop(device_id: str) -> dict[str, object]:
+        service = require_android_debug(device_id)
+        return await call_android(service.stop_macro, device_id=device_id)
+
+    @application.post("/api/android/{device_id}/macro/reset")
+    async def android_device_macro_reset(device_id: str) -> dict[str, object]:
+        service = require_android_debug(device_id)
+        return await call_android(service.reset_macro, device_id=device_id)
+
+    @application.post("/api/android/{device_id}/macro/step")
+    async def android_device_macro_step(device_id: str) -> dict[str, object]:
+        service = require_android_debug(device_id)
+        return await call_android(service.step_macro, device_id=device_id)
 
     @application.get("/api/logs")
     async def logs(

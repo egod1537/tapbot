@@ -26,6 +26,31 @@ BACKEND_IMPORTS = (
 )
 
 
+def load_local_environment() -> None:
+    """Load ignored backend secrets without overriding the caller's shell."""
+
+    path = ROOT / ".env.local"
+    if not path.is_file():
+        return
+    for line_number, raw_line in enumerate(
+        path.read_text(encoding="utf-8").splitlines(),
+        start=1,
+    ):
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if "=" not in line:
+            raise RuntimeError(f"Invalid .env.local line {line_number}")
+        name, value = line.split("=", 1)
+        name = name.strip()
+        value = value.strip()
+        if value.startswith(('"', "'")) and value.endswith(value[:1]):
+            value = value[1:-1]
+        if not name or not name.replace("_", "").isalnum():
+            raise RuntimeError(f"Invalid .env.local key on line {line_number}")
+        os.environ.setdefault(name, value)
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--robot", choices=("mock", "grbl"), default="mock")
@@ -112,9 +137,9 @@ def stop_process_tree(process: subprocess.Popen[bytes]) -> None:
 
 
 def main() -> int:
-    args = parse_args()
-
     try:
+        load_local_environment()
+        args = parse_args()
         npm = npm_command()
         bootstrap(npm)
         backend_port = available_port(args.backend_port)

@@ -16,6 +16,8 @@ class ResolvedTarget:
     center: Point2D
     source: str
     detection: Detection | None = None
+    bbox: BoundingBox | None = None
+    metadata: Mapping[str, object] | None = None
 
 
 class TargetResolver:
@@ -70,6 +72,7 @@ class TargetResolver:
                 center=selected.center,
                 source="detection",
                 detection=selected,
+                bbox=selected.bbox,
             )
 
         roi = self._predefined_rois.get(target_name)

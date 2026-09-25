@@ -6,6 +6,8 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Any
 
+from tapbot.device.gesture import PointerGesture
+
 
 class ControllerCapabilityError(RuntimeError):
     """Raised when a backend cannot implement a requested primitive."""
@@ -30,11 +32,19 @@ class ControllerResult:
 class DeviceController(ABC):
     """The only input surface exposed to the PC macro engine."""
 
-    @abstractmethod
-    def tap(self, x: float, y: float, *, duration_ms: int = 70) -> ControllerResult:
-        pass
+    def execute_gesture(self, gesture: PointerGesture) -> ControllerResult:
+        raise ControllerCapabilityError(
+            f"{type(self).__name__} does not support pointer gestures"
+        )
 
-    @abstractmethod
+    def tap(self, x: float, y: float, *, duration_ms: int = 70) -> ControllerResult:
+        return self._compatibility_result(
+            self.execute_gesture(
+                PointerGesture.from_tap(x, y, duration_ms=duration_ms)
+            ),
+            "tap",
+        )
+
     def swipe(
         self,
         x1: float,
@@ -44,7 +54,30 @@ class DeviceController(ABC):
         *,
         duration_ms: int = 450,
     ) -> ControllerResult:
-        pass
+        return self._compatibility_result(
+            self.execute_gesture(
+                PointerGesture.from_swipe(
+                    x1,
+                    y1,
+                    x2,
+                    y2,
+                    duration_ms=duration_ms,
+                )
+            ),
+            "swipe",
+        )
+
+    @staticmethod
+    def _compatibility_result(
+        result: ControllerResult,
+        command: str,
+    ) -> ControllerResult:
+        return ControllerResult(
+            command=command,
+            state=result.state,
+            action_id=result.action_id,
+            metadata=result.metadata,
+        )
 
     @abstractmethod
     def back(self) -> ControllerResult:

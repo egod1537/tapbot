@@ -6,6 +6,9 @@ from tapbot.android.client import (
     AndroidAgentClient,
     AndroidAgentTransportError,
     AndroidScreenshot,
+    AndroidUiBounds,
+    AndroidUiNode,
+    AndroidUiTree,
 )
 
 __all__ = [
@@ -14,4 +17,7 @@ __all__ = [
     "AndroidAgentClient",
     "AndroidAgentTransportError",
     "AndroidScreenshot",
+    "AndroidUiBounds",
+    "AndroidUiNode",
+    "AndroidUiTree",
 ]

@@ -7,6 +7,7 @@ from tapbot.android.client import AndroidActionResult, AndroidScreenshot
 from tapbot.camera.mock_graph import MockHotspot
 from tapbot.camera.mock_graph_source import MockGraphCameraSource
 from tapbot.device import AndroidRemoteController, MockGraphController
+from tapbot.device.gesture import PointerGesture
 from tapbot.macro import (
     DetectionStateClassifier,
     DetectionStateRule,
@@ -161,6 +162,11 @@ class MacroAndroidClient:
     def tap(self, x: float, y: float, *, duration_ms: int) -> AndroidActionResult:
         self.taps.append((x, y, duration_ms))
         return AndroidActionResult("req-7", "action-7", "tap", "completed")
+
+    def gesture(self, gesture: PointerGesture) -> AndroidActionResult:
+        first = gesture.points[0]
+        self.taps.append((first.x, first.y, gesture.duration_ms))
+        return AndroidActionResult("req-7", "action-7", "gesture", "completed")
 
     def swipe(self, *args: object, **kwargs: object) -> AndroidActionResult:
         raise AssertionError("swipe should not be called")

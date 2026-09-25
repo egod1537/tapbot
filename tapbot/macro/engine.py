@@ -6,9 +6,11 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 import time
+from typing import Protocol
 
 import cv2
 
+from tapbot.android.client import AndroidUiTree
 from tapbot.device.controller import ControllerResult, DeviceController
 from tapbot.macro.actions import (
     BackAction,
@@ -27,9 +29,17 @@ from tapbot.model.resolver import ResolvedTarget, TargetResolver
 from tapbot.screen.geometry import ScreenGeometry, ScreenInsets
 from tapbot.screen.source import ScreenFrame, ScreenSource
 from tapbot.vision.canonical import CanonicalVisionPipeline, CanonicalVisionResult
+from tapbot.ui_resolution.models import StructuredStateClassification, UiTreeProvider
+from tapbot.ui_resolution.resolver import HybridTargetResolver
 
 
 GeometryFactory = Callable[[ScreenFrame, dict[str, object]], ScreenGeometry]
+
+
+class UiTreeStateClassifier(Protocol):
+    def classify(
+        self, tree: AndroidUiTree
+    ) -> StructuredStateClassification | None: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -41,6 +51,7 @@ class MacroStepResult:
     resolved_target: ResolvedTarget | None
     controller_result: ControllerResult | None
     trace: MacroStepTrace
+    ui_tree: AndroidUiTree | None = None
 
 
 class MacroEngine:
@@ -63,7 +74,13 @@ class MacroEngine:
         geometry_factory: GeometryFactory | None = None,
         artifact_dir: str | Path | None = None,
         sleep: Callable[[float], None] = time.sleep,
+        ui_tree_provider: UiTreeProvider | None = None,
+        hybrid_target_resolver: HybridTargetResolver | None = None,
+        ui_tree_state_classifier: UiTreeStateClassifier | None = None,
+        ui_tree_max_age_ms: float = 500,
     ) -> None:
+        if ui_tree_max_age_ms < 0:
+            raise ValueError("ui_tree_max_age_ms must not be negative")
         self.source = source
         self.vision = vision
         self.classifier = classifier
@@ -73,12 +90,35 @@ class MacroEngine:
         self.geometry_factory = geometry_factory or _default_geometry
         self.artifact_dir = None if artifact_dir is None else Path(artifact_dir)
         self.sleep = sleep
+        self.ui_tree_provider = ui_tree_provider
+        self.hybrid_target_resolver = hybrid_target_resolver
+        self.ui_tree_state_classifier = ui_tree_state_classifier
+        self.ui_tree_max_age_ms = ui_tree_max_age_ms
         self.trace = MacroTrace()
 
     def step(self, *, execute: bool = True) -> MacroStepResult:
         frame = self.source.screenshot()
+        ui_tree: AndroidUiTree | None = None
+        ui_tree_error: str | None = None
+        if self.ui_tree_provider is not None:
+            try:
+                ui_tree = self.ui_tree_provider.snapshot(
+                    max_age_ms=self.ui_tree_max_age_ms
+                )
+            except Exception as error:
+                ui_tree_error = str(error)
         vision = self.vision.run(frame)
         classification = self.classifier.classify(frame, vision.detections)
+        if ui_tree is not None and self.ui_tree_state_classifier is not None:
+            accessibility_classification = self.ui_tree_state_classifier.classify(
+                ui_tree
+            )
+            if accessibility_classification is not None:
+                classification = StateClassification(
+                    accessibility_classification.state,
+                    accessibility_classification.confidence,
+                    accessibility_classification.evidence,
+                )
         decision = self.state_machine.decide(classification)
         resolved: ResolvedTarget | None = None
         controller_result: ControllerResult | None = None
@@ -88,12 +128,21 @@ class MacroEngine:
         target_trace: dict[str, object] | None = None
 
         if isinstance(decision, TapTargetAction):
-            resolved = self.target_resolver.resolve(
-                decision.target,
-                vision.detections,
-                screen_width=frame.width,
-                screen_height=frame.height,
-            )
+            if self.hybrid_target_resolver is not None:
+                resolved = self.hybrid_target_resolver.resolve(
+                    decision.target,
+                    vision.detections,
+                    screen_width=frame.width,
+                    screen_height=frame.height,
+                    ui_tree=ui_tree,
+                )
+            else:
+                resolved = self.target_resolver.resolve(
+                    decision.target,
+                    vision.detections,
+                    screen_width=frame.width,
+                    screen_height=frame.height,
+                )
             if resolved is None:
                 status = "target_not_found"
                 error = f"Target {decision.target!r} was not resolved"
@@ -109,6 +158,8 @@ class MacroEngine:
                     "screen": {"x": resolved.center.x, "y": resolved.center.y},
                     "device": {"x": device_x, "y": device_y},
                 }
+                if resolved.metadata is not None:
+                    target_trace["metadata"] = dict(resolved.metadata)
                 if execute:
                     try:
                         controller_result = self.controller.tap(
@@ -132,6 +183,11 @@ class MacroEngine:
                 status = "execution_failed"
                 error = str(caught)
                 api_result = _error_result(caught)
+
+        if status == "executed" and controller_result is not None:
+            invalidate = getattr(self.ui_tree_provider, "invalidate", None)
+            if callable(invalidate):
+                invalidate()
 
         step_number = len(self.trace.steps) + 1
         screenshot_path = self._save_screenshot(frame, step_number)
@@ -158,6 +214,13 @@ class MacroEngine:
             ),
             status=status,
             error=error,
+            ui_tree={
+                "captured_at": None if ui_tree is None else ui_tree.captured_at,
+                "package_name": None if ui_tree is None else ui_tree.package_name,
+                "node_count": 0 if ui_tree is None else len(ui_tree.nodes),
+                "truncated": False if ui_tree is None else ui_tree.truncated,
+                "error": ui_tree_error,
+            },
         )
         self.trace.append(step_trace)
         return MacroStepResult(
@@ -168,6 +231,7 @@ class MacroEngine:
             resolved,
             controller_result,
             step_trace,
+            ui_tree,
         )
 
     def finish(self, path: str | Path | None = None) -> MacroTrace:

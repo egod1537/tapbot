@@ -10,8 +10,6 @@ from tapbot.macro.actions import (
     TapTargetAction,
     WaitAction,
 )
-from tapbot.macro.engine import MacroEngine, MacroStepResult
-from tapbot.macro.runtime import build_android_macro_engine
 from tapbot.macro.state import (
     DetectionStateClassifier,
     DetectionStateRule,
@@ -19,6 +17,8 @@ from tapbot.macro.state import (
     StateClassification,
     StateClassifier,
 )
+from tapbot.macro.engine import MacroEngine, MacroStepResult
+from tapbot.macro.runtime import build_android_macro_engine
 from tapbot.macro.trace import MacroStepTrace, MacroTrace
 
 __all__ = [

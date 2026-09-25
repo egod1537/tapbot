@@ -4,8 +4,15 @@ import cv2
 from fastapi.testclient import TestClient
 import numpy as np
 
-from tapbot.android.client import AndroidActionResult, AndroidScreenshot
+from tapbot.android.client import (
+    AndroidActionResult,
+    AndroidScreenshot,
+    AndroidUiBounds,
+    AndroidUiNode,
+    AndroidUiTree,
+)
 from tapbot.ui.app import create_app
+from tapbot.device.gesture import PointerGesture
 from tapbot.vision.detector import ColorButtonConfig, ColorButtonDetector
 
 
@@ -92,6 +99,11 @@ class FakeAndroidClient:
         self.taps.append((x, y, duration_ms))
         return AndroidActionResult("req-tap", "action-tap", "tap", "completed")
 
+    def gesture(self, gesture: PointerGesture) -> AndroidActionResult:
+        first = gesture.points[0]
+        self.taps.append((first.x, first.y, gesture.duration_ms))
+        return AndroidActionResult("req-gesture", "action-gesture", "gesture", "completed")
+
     def back(self) -> AndroidActionResult:
         self.commands.append("back")
         return AndroidActionResult("req-back", "action-back", "back", "dispatched")
@@ -102,6 +114,32 @@ class FakeAndroidClient:
 
     def iter_stream(self):
         yield b"--tapbotframe\r\nContent-Type: image/jpeg\r\n\r\nfake\r\n"
+
+    def ui_tree(self) -> AndroidUiTree:
+        root = _ui_node(
+            "n0",
+            bounds=AndroidUiBounds(0, 0, 200, 100),
+        )
+        button = _ui_node(
+            "n0.0",
+            parent_id="n0",
+            depth=1,
+            text="예약하기",
+            clickable=True,
+            bounds=AndroidUiBounds(10, 10, 50, 30),
+        )
+        return AndroidUiTree(
+            request_id="tree-test",
+            captured_at="2026-09-25T00:00:00Z",
+            package_name="com.example",
+            window_title=None,
+            rotation=0,
+            screen_width=200,
+            screen_height=100,
+            root=root,
+            nodes=(root, button),
+            truncated=False,
+        )
 
 
 def make_android_client(
@@ -131,6 +169,7 @@ def test_android_proxy_status_screenshot_and_stream(tmp_path: Path) -> None:
         status = client.get("/api/android/status")
         screenshot = client.get("/api/android/screenshot")
         stream = client.get("/api/android/stream")
+        ui_tree = client.get("/api/android/default/ui-tree")
 
     assert status.json()["connected"] is True
     assert status.json()["stream"]["fps"] == 20.0
@@ -142,6 +181,7 @@ def test_android_proxy_status_screenshot_and_stream(tmp_path: Path) -> None:
         3,
     )
     assert b"tapbotframe" in stream.content
+    assert ui_tree.json()["nodes"][1]["text"] == "예약하기"
 
 
 def test_android_vision_macro_step_and_manual_controls(tmp_path: Path) -> None:
@@ -154,6 +194,16 @@ def test_android_vision_macro_step_and_manual_controls(tmp_path: Path) -> None:
             "/api/android/tap",
             json={"x": 10, "y": 20, "duration_ms": 80},
         )
+        gesture = client.post(
+            "/api/android/default/gesture",
+            json={
+                "points": [
+                    {"x": 20, "y": 80, "t_ms": 0},
+                    {"x": 30, "y": 40, "t_ms": 120},
+                    {"x": 40, "y": 20, "t_ms": 240},
+                ]
+            },
+        )
         assert client.post("/api/android/back").status_code == 200
         assert client.post("/api/android/home").status_code == 200
         saved = client.post("/api/android/screenshot/save")
@@ -163,7 +213,14 @@ def test_android_vision_macro_step_and_manual_controls(tmp_path: Path) -> None:
     assert step.json()["macro"]["step_index"] == 1
     assert step.json()["last_action"]["type"] == "tap_target"
     assert manual.json()["device"] == {"x": 10.0, "y": 20.0}
-    assert len(android.taps) == 2
+    assert gesture.status_code == 200
+    assert gesture.json()["device"]["points"][-1] == {
+        "x": 40.0,
+        "y": 20.0,
+        "t_ms": 240,
+    }
+    assert len(android.taps) == 3
+    assert android.taps[0][:2] == (30.0, 20.0)
     assert android.commands == ["back", "home"]
     assert Path(saved.json()["path"]).is_file()
 
@@ -177,3 +234,61 @@ def test_android_routes_report_unconfigured_without_touching_legacy_camera() -> 
 
     assert status.json()["configured"] is False
     assert screenshot.status_code == 503
+
+
+def test_android_gesture_route_rejects_invalid_shape_and_bounds(tmp_path: Path) -> None:
+    client, _ = make_android_client(tmp_path)
+
+    with client:
+        too_short = client.post(
+            "/api/android/default/gesture",
+            json={"points": [{"x": 1, "y": 1, "t_ms": 0}]},
+        )
+        outside = client.post(
+            "/api/android/default/gesture",
+            json={
+                "points": [
+                    {"x": 1, "y": 1, "t_ms": 0},
+                    {"x": 201, "y": 1, "t_ms": 100},
+                ]
+            },
+        )
+
+    assert too_short.status_code == 422
+    assert "at least two" in too_short.json()["detail"]
+    assert outside.status_code == 422
+    assert "point_out_of_bounds" in outside.json()["detail"]
+
+
+def _ui_node(
+    node_id: str,
+    *,
+    parent_id: str | None = None,
+    depth: int = 0,
+    text: str | None = None,
+    clickable: bool = False,
+    bounds: AndroidUiBounds,
+) -> AndroidUiNode:
+    return AndroidUiNode(
+        node_id=node_id,
+        parent_id=parent_id,
+        depth=depth,
+        class_name="android.widget.Button" if clickable else "android.view.View",
+        text=text,
+        content_description=None,
+        view_id_resource_name=None,
+        package_name="com.example",
+        bounds=bounds,
+        clickable=clickable,
+        enabled=True,
+        focusable=False,
+        focused=False,
+        selected=False,
+        checked=False,
+        checkable=False,
+        scrollable=False,
+        editable=False,
+        visible_to_user=True,
+        password=False,
+        child_count=0,
+    )

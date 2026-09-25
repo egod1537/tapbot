@@ -9,9 +9,11 @@ node_modules/
 frontend/dist/
 frontend/.env.local
 frontend/.env.*.local
+/.env.local
 /simulation-trace.json
 /replay-trace.json
 /tapbot-captures/
+/config/android-devices.json
 *.pt
 android-agent/.gradle/
 android-agent/local.properties

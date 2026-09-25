@@ -42,7 +42,7 @@ Blueprint dark theme가 앱 루트에 적용되며 `/debug`에는 다음 영역�
 - Android/Stream/Macro 상태 Navbar
 - MJPEG live stream과 screenshot fallback
 - PC Vision detection overlay와 planned tap point
-- 명시적으로 켜야 하는 manual Tap Mode
+- 명시적으로 켜야 하는 Manual Control click/drag mode
 - Screenshot, Back, Home control
 - Macro Start/Stop/Pause/Reset/Step
 - State, detection, decision, action result, event log
@@ -62,17 +62,37 @@ Robot Control, Model Debug, G-code Console, Calibration 편집기는 `/debug`에
 
 브라우저는 아래 PC FastAPI endpoint만 사용합니다.
 
-- `GET /api/android/status`
-- `GET /api/android/screenshot`
-- `GET /api/android/stream`
-- `POST /api/android/screenshot/save`
-- `POST /api/android/tap`, `/back`, `/home`
-- `POST /api/android/vision/run`
-- `GET /api/android/debug/state`
-- `POST /api/android/macro/start`, `/pause`, `/stop`, `/reset`, `/step`
+- `GET /api/android/devices`
+- `GET /api/android/{device_id}/status`
+- `GET /api/android/{device_id}/screenshot`, `/stream`
+- `GET /api/android/{device_id}/ui-tree`
+- `POST /api/android/{device_id}/screenshot/save`
+- `POST /api/android/{device_id}/tap`, `/swipe`, `/back`, `/home`
+- `POST /api/android/{device_id}/gesture`
+- `POST /api/android/{device_id}/vision/run`
+- `GET /api/android/{device_id}/debug/state`
+- `POST /api/android/{device_id}/macro/start`, `/pause`, `/stop`, `/reset`, `/step`
 
-저장 screenshot과 macro trace 기본 위치는 `tapbot-captures/android`입니다.
+단일 디바이스 환경의 기존 `/api/android/status` 등의 endpoint는 default device
+별칭으로 유지됩니다. 저장 screenshot과 macro trace 기본 위치는
+`tapbot-captures/android/{device_id}`입니다.
 `TAPBOT_ANDROID_CAPTURE_DIR`로 변경할 수 있습니다.
+
+UI tree는 선택된 device에서만 1Hz로 조회하며 Accessibility node 검색과 bounds
+overlay에 사용됩니다. 해당 source가 없거나 target이 모호하면 macro resolver는 기존
+Vision detection으로 fallback합니다. UI tree 조회를 위해 Android Agent token을
+브라우저에 전달하지 않습니다.
+
+Manual Control은 live screen의 pointer down/move/up을 브라우저에서 기록하고
+pointer-up 시점에만 완성된 trajectory를 backend로 보냅니다. 8px/300ms 미만 입력은
+tap으로, 나머지는 gesture로 처리합니다. 경로는 4px 또는 12ms 간격으로 sampling하고
+최대 256개 점으로 resample하며 device 전환, pointer cancel, stream disconnect 시 진행
+중인 기록을 폐기합니다.
+
+멀티 디바이스 설정은 `TAPBOT_ANDROID_DEVICES_CONFIG`에 JSON 경로를 지정합니다.
+`config/android-devices.example.json`을 복사하되 실제 token 파일은 commit하지
+마세요. 각 token은 `TAPBOT_ANDROID_DEVICE_<DEVICE_ID>_TOKEN` 환경변수로 덮어쓸 수
+있으며 `-`는 `_`로 변환됩니다.
 
 ## Legacy Camera / Vision API
 
@@ -140,6 +160,7 @@ Vite는 실행 모드에 맞춰 `.env.development` 또는 `.env.production`을 �
 
 ```bash
 npm run lint
+npm test
 npm run typecheck
 npm run build
 npm run format:check

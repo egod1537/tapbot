@@ -121,6 +121,9 @@ class MainActivity : Activity() {
             val clipboard = getSystemService(ClipboardManager::class.java)
             clipboard.setPrimaryClip(ClipData.newPlainText("TapBot API token", tokenText.text))
         }, matchWidth())
+        container.addView(button("Rotate token") {
+            tokenText.text = ApiTokenStore(this).rotate()
+        }, matchWidth())
         container.addView(button("Enable Accessibility") {
             startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
         }, matchWidth())

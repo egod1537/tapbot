@@ -5,9 +5,12 @@ from __future__ import annotations
 from dataclasses import dataclass
 import json
 from collections.abc import Iterator
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
+
+if TYPE_CHECKING:
+    from tapbot.device.gesture import PointerGesture
 
 
 @dataclass(frozen=True, slots=True)
@@ -27,6 +30,122 @@ class AndroidScreenshot:
     height: int
     rotation: int
     captured_at: str
+
+
+@dataclass(frozen=True, slots=True)
+class AndroidUiBounds:
+    left: int
+    top: int
+    right: int
+    bottom: int
+
+    @property
+    def width(self) -> int:
+        return max(0, self.right - self.left)
+
+    @property
+    def height(self) -> int:
+        return max(0, self.bottom - self.top)
+
+    @property
+    def area(self) -> int:
+        return self.width * self.height
+
+    @property
+    def center(self) -> tuple[float, float]:
+        return ((self.left + self.right) / 2, (self.top + self.bottom) / 2)
+
+    def to_dict(self) -> dict[str, int]:
+        return {
+            "left": self.left,
+            "top": self.top,
+            "right": self.right,
+            "bottom": self.bottom,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class AndroidUiNode:
+    node_id: str
+    parent_id: str | None
+    depth: int
+    class_name: str | None
+    text: str | None
+    content_description: str | None
+    view_id_resource_name: str | None
+    package_name: str | None
+    bounds: AndroidUiBounds
+    clickable: bool
+    enabled: bool
+    focusable: bool
+    focused: bool
+    selected: bool
+    checked: bool
+    checkable: bool
+    scrollable: bool
+    editable: bool
+    visible_to_user: bool
+    password: bool
+    child_count: int
+    children: tuple["AndroidUiNode", ...] = ()
+
+    def to_dict(self, *, include_children: bool = True) -> dict[str, object]:
+        result: dict[str, object] = {
+            "node_id": self.node_id,
+            "parent_id": self.parent_id,
+            "depth": self.depth,
+            "class_name": self.class_name,
+            "text": self.text,
+            "content_description": self.content_description,
+            "view_id_resource_name": self.view_id_resource_name,
+            "package_name": self.package_name,
+            "bounds": self.bounds.to_dict(),
+            "clickable": self.clickable,
+            "enabled": self.enabled,
+            "focusable": self.focusable,
+            "focused": self.focused,
+            "selected": self.selected,
+            "checked": self.checked,
+            "checkable": self.checkable,
+            "scrollable": self.scrollable,
+            "editable": self.editable,
+            "visible_to_user": self.visible_to_user,
+            "password": self.password,
+            "child_count": self.child_count,
+        }
+        if include_children:
+            result["children"] = [child.to_dict() for child in self.children]
+        return result
+
+
+@dataclass(frozen=True, slots=True)
+class AndroidUiTree:
+    request_id: str
+    captured_at: str
+    package_name: str | None
+    window_title: str | None
+    rotation: int
+    screen_width: int
+    screen_height: int
+    root: AndroidUiNode
+    nodes: tuple[AndroidUiNode, ...]
+    truncated: bool
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "ok": True,
+            "request_id": self.request_id,
+            "captured_at": self.captured_at,
+            "package_name": self.package_name,
+            "window_title": self.window_title,
+            "rotation": self.rotation,
+            "screen_width": self.screen_width,
+            "screen_height": self.screen_height,
+            "node_count": len(self.nodes),
+            "truncated": self.truncated,
+            "root": self.root.to_dict(),
+            "nodes": [node.to_dict(include_children=False) for node in self.nodes],
+        }
 
 
 class AndroidAgentApiError(RuntimeError):
@@ -136,6 +255,43 @@ class AndroidAgentClient:
                 request_id=headers.get("X-Request-Id"),
             ) from error
 
+    def ui_tree(self) -> AndroidUiTree:
+        payload = self._json_request("GET", "/api/ui-tree")
+        try:
+            root = _ui_node(payload.get("root"))
+            raw_nodes = payload.get("nodes")
+            if isinstance(raw_nodes, list):
+                nodes = tuple(_ui_node(item) for item in raw_nodes)
+            else:
+                nodes = tuple(_flatten_ui_nodes(root))
+            screen_width = _required_int(payload, "screen_width", minimum=1)
+            screen_height = _required_int(payload, "screen_height", minimum=1)
+            rotation = _required_int(payload, "rotation", minimum=0)
+            if rotation not in (0, 90, 180, 270):
+                raise ValueError("rotation must be 0, 90, 180, or 270")
+            return AndroidUiTree(
+                request_id=_required_string(payload, "request_id"),
+                captured_at=_required_string(payload, "captured_at"),
+                package_name=_optional_string(payload.get("package_name")),
+                window_title=_optional_string(payload.get("window_title")),
+                rotation=rotation,
+                screen_width=screen_width,
+                screen_height=screen_height,
+                root=root,
+                nodes=nodes,
+                truncated=_required_bool(payload, "truncated"),
+            )
+        except (KeyError, TypeError, ValueError) as error:
+            raise AndroidAgentApiError(
+                f"Android Agent returned an invalid UI tree: {error}",
+                code="invalid_ui_tree",
+                request_id=(
+                    str(payload["request_id"])
+                    if payload.get("request_id") is not None
+                    else None
+                ),
+            ) from error
+
     def tap(self, x: float, y: float, *, duration_ms: int = 70) -> AndroidActionResult:
         return self._action(
             "/api/tap",
@@ -162,6 +318,13 @@ class AndroidAgentClient:
                 "duration_ms": duration_ms,
             },
             duration_ms=duration_ms,
+        )
+
+    def gesture(self, gesture: PointerGesture) -> AndroidActionResult:
+        return self._action(
+            "/api/gesture",
+            {"points": [point.to_dict() for point in gesture.points]},
+            duration_ms=gesture.duration_ms,
         )
 
     def back(self) -> AndroidActionResult:
@@ -310,3 +473,95 @@ def _required_string(payload: dict[str, Any], key: str) -> str:
             ),
         )
     return value
+
+
+def _optional_string(value: object) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise ValueError("optional string field has a non-string value")
+    return value
+
+
+def _required_int(
+    payload: dict[str, Any],
+    key: str,
+    *,
+    minimum: int | None = None,
+) -> int:
+    value = payload.get(key)
+    if not isinstance(value, int) or isinstance(value, bool):
+        raise ValueError(f"{key} must be an integer")
+    if minimum is not None and value < minimum:
+        raise ValueError(f"{key} must be at least {minimum}")
+    return value
+
+
+def _required_bool(payload: dict[str, Any], key: str) -> bool:
+    value = payload.get(key)
+    if not isinstance(value, bool):
+        raise ValueError(f"{key} must be a boolean")
+    return value
+
+
+def _ui_node(value: object) -> AndroidUiNode:
+    if not isinstance(value, dict):
+        raise ValueError("UI node must be an object")
+    raw_bounds = value.get("bounds")
+    if not isinstance(raw_bounds, dict):
+        raise ValueError("UI node bounds must be an object")
+    children = value.get("children", [])
+    if not isinstance(children, list):
+        raise ValueError("UI node children must be an array")
+    node_id = value.get("node_id")
+    if not isinstance(node_id, str) or not node_id:
+        raise ValueError("UI node_id must be a non-empty string")
+    password = _node_bool(value, "password")
+    return AndroidUiNode(
+        node_id=node_id,
+        parent_id=_optional_string(value.get("parent_id")),
+        depth=_node_int(value, "depth", minimum=0),
+        class_name=_optional_string(value.get("class_name")),
+        text=None if password else _optional_string(value.get("text")),
+        content_description=_optional_string(value.get("content_description")),
+        view_id_resource_name=_optional_string(value.get("view_id_resource_name")),
+        package_name=_optional_string(value.get("package_name")),
+        bounds=AndroidUiBounds(
+            _node_int(raw_bounds, "left"),
+            _node_int(raw_bounds, "top"),
+            _node_int(raw_bounds, "right"),
+            _node_int(raw_bounds, "bottom"),
+        ),
+        clickable=_node_bool(value, "clickable"),
+        enabled=_node_bool(value, "enabled"),
+        focusable=_node_bool(value, "focusable"),
+        focused=_node_bool(value, "focused"),
+        selected=_node_bool(value, "selected"),
+        checked=_node_bool(value, "checked"),
+        checkable=_node_bool(value, "checkable"),
+        scrollable=_node_bool(value, "scrollable"),
+        editable=_node_bool(value, "editable"),
+        visible_to_user=_node_bool(value, "visible_to_user"),
+        password=password,
+        child_count=_node_int(value, "child_count", minimum=0),
+        children=tuple(_ui_node(child) for child in children),
+    )
+
+
+def _node_int(
+    payload: dict[str, Any],
+    key: str,
+    *,
+    minimum: int | None = None,
+) -> int:
+    return _required_int(payload, key, minimum=minimum)
+
+
+def _node_bool(payload: dict[str, Any], key: str) -> bool:
+    return _required_bool(payload, key)
+
+
+def _flatten_ui_nodes(root: AndroidUiNode) -> Iterator[AndroidUiNode]:
+    yield root
+    for child in root.children:
+        yield from _flatten_ui_nodes(child)

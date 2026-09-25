@@ -13,6 +13,7 @@ export function App() {
         <Route element={<AppShell />}>
           <Route index element={<Navigate to="/debug" replace />} />
           <Route path="debug" element={<DebugPage />} />
+          <Route path="debug/android/:deviceId" element={<DebugPage />} />
           <Route path="tools/webcam" element={<WebcamToolPage />} />
           <Route path="tools/simulation" element={<SimulationToolPage />} />
           <Route path="settings" element={<SettingsPage />} />

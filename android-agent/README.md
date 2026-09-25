@@ -54,9 +54,10 @@ PC Macro Engine용 canonical primitive 경로는 다음과 같습니다. 위 `/a
 | GET    | `/api/screenshot` | 최신 JPEG                    |
 | POST   | `/api/tap`        | 완료 callback까지 기다림     |
 | POST   | `/api/swipe`      | 완료 callback까지 기다림     |
+| POST   | `/api/gesture`    | pointer trajectory 단일 실행 |
 | POST   | `/api/back`       | global action dispatch       |
 | POST   | `/api/home`       | global action dispatch       |
-| GET    | `/api/ui-tree`    | 현재 build에서는 명시적 501  |
+| GET    | `/api/ui-tree`    | 현재 활성 창의 접근성 UI tree |
 | GET    | `/api/stream`     | 인증된 MJPEG live stream     |
 
 Screen capture/stream 전용 별칭도 제공합니다.
@@ -94,12 +95,28 @@ Accessibility gesture callback이 도착한 뒤 `completed`가 됩니다. Androi
 Android callback timeout은 gesture duration + 2초입니다. Python/PC client timeout은
 최소 gesture duration + 3초를 권장합니다.
 
+`GET /api/ui-tree`는 `rootInActiveWindow`의 읽기 전용 snapshot과 검색용 flat node
+목록을 함께 반환합니다. snapshot node ID는 임시 traversal ID이며 다음 snapshot에서
+같은 node를 가리킨다고 가정하면 안 됩니다. 최대 2,000 nodes, depth 50, 문자열 512자로
+제한하며 제한에 도달하면 HTTP 실패 대신 `truncated=true`를 반환합니다. password
+node의 text는 항상 제거합니다. password가 아닌 editable text는 현재 debug 인식을
+위해 유지되므로 응답 전체를 logcat에 기록하지 않으며, 서버도 package/node count만
+기록합니다. 활성 root가 없으면 `ui_tree_unavailable`과 HTTP 503을 반환합니다.
+
 기본 입력 guard:
 
 - tap: 최대 10회/초
 - swipe: 최대 4회/초
+- gesture: 최대 4회/초, 2~256 points, 최대 10초
 - back/home/recents: 최대 6회/초
 - 동시 gesture는 queue에 넣지 않고 `gesture_busy`로 거부
+
+`POST /api/gesture`는 `{ "points": [{ "x": 500, "y": 1800,
+"t_ms": 0 }, ...] }` 형식을 받습니다. 좌표, monotonic timestamp, 화면 bounds 및 전체
+path length를 검증한 뒤 모든 점을 하나의 `GestureDescription.Path`로 변환합니다.
+현재 버전은 첫/마지막 timestamp로 전체 duration을 유지하고 중간 timestamp를 별도 속도
+profile로 재생성하지 않습니다. `/api/tap`과 `/api/swipe`도 내부적으로 같은 gesture
+실행 primitive를 사용합니다.
 
 앱의 `Remote Control`은 최초 설치 시 OFF입니다. 입력을 보내기 전에 앱에서 켜야 하며,
 비상 시 이 토글을 끄면 screenshot/stream은 유지하면서 모든 input endpoint를 즉시

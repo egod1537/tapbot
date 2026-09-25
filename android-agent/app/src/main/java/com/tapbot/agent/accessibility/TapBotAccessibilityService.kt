@@ -17,6 +17,7 @@ import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicReference
 import java.util.concurrent.locks.ReentrantLock
 import java.util.UUID
+import java.time.Instant
 
 enum class ActionOutcome {
     COMPLETED,
@@ -65,12 +66,12 @@ class TapBotAccessibilityService : AccessibilityService() {
         y: Float,
         durationMs: Long = DEFAULT_TAP_DURATION_MS,
     ): ActionExecutionResult {
-        val path = Path().apply { moveTo(x, y) }
-        return dispatch(
-            GestureDescription.Builder()
-                .addStroke(GestureDescription.StrokeDescription(path, 0, durationMs))
-                .build(),
-            "tap",
+        return gesture(
+            listOf(
+                GesturePoint(x, y, 0),
+                GesturePoint(x, y, durationMs),
+            ),
+            command = "tap",
         )
     }
 
@@ -81,15 +82,30 @@ class TapBotAccessibilityService : AccessibilityService() {
         y2: Float,
         durationMs: Long,
     ): ActionExecutionResult {
+        return gesture(
+            listOf(
+                GesturePoint(x1, y1, 0),
+                GesturePoint(x2, y2, durationMs),
+            ),
+            command = "swipe",
+        )
+    }
+
+    fun gesture(
+        points: List<GesturePoint>,
+        command: String = "gesture",
+    ): ActionExecutionResult {
+        require(points.size >= 2) { "Gesture requires at least two points" }
         val path = Path().apply {
-            moveTo(x1, y1)
-            lineTo(x2, y2)
+            moveTo(points.first().x, points.first().y)
+            points.drop(1).forEach { lineTo(it.x, it.y) }
         }
+        val durationMs = points.last().tMs - points.first().tMs
         return dispatch(
             GestureDescription.Builder()
                 .addStroke(GestureDescription.StrokeDescription(path, 0, durationMs))
                 .build(),
-            "swipe",
+            command,
         )
     }
 
@@ -99,6 +115,51 @@ class TapBotAccessibilityService : AccessibilityService() {
 
     fun recents(): ActionExecutionResult = globalAction {
         performGlobalAction(GLOBAL_ACTION_RECENTS)
+    }
+
+    fun uiTreeSnapshot(): UiTreeSnapshot? {
+        val result = AtomicReference<UiTreeSnapshot?>(null)
+        val completed = CountDownLatch(1)
+        val capture = Runnable {
+            try {
+                val root = rootInActiveWindow ?: return@Runnable
+                val window = root.window
+                val windowTitle = try {
+                    window?.title?.toString()
+                } finally {
+                    @Suppress("DEPRECATION")
+                    window?.recycle()
+                }
+                val display = AgentStateStore.snapshot().display
+                result.set(
+                    UiTreeSnapshotter().snapshot(
+                        AccessibilityNodeSource(root),
+                        UiTreeMetadata(
+                            capturedAt = Instant.now().toString(),
+                            windowTitle = windowTitle,
+                            rotation = display.rotation,
+                            screenWidth = display.logicalWidth,
+                            screenHeight = display.logicalHeight,
+                        ),
+                    ),
+                )
+            } catch (error: Exception) {
+                AgentStateStore.update { it.copy(lastError = "UI tree snapshot failed") }
+                Log.e(TAG, "UI tree snapshot failed", error)
+            } finally {
+                completed.countDown()
+            }
+        }
+        if (Looper.myLooper() == Looper.getMainLooper()) {
+            capture.run()
+        } else {
+            mainHandler.post(capture)
+            if (!completed.await(MAIN_THREAD_TIMEOUT_MS, TimeUnit.MILLISECONDS)) {
+                mainHandler.removeCallbacks(capture)
+                return null
+            }
+        }
+        return result.get()
     }
 
     private fun dispatch(

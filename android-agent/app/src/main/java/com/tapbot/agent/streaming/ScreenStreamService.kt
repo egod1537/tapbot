@@ -66,9 +66,10 @@ class ScreenStreamService : Service() {
 
     private fun startControlServer() {
         if (controlServer != null) return
+        val tokenStore = ApiTokenStore(applicationContext)
         val server = ControlServer(
             port = DEFAULT_PORT,
-            apiToken = ApiTokenStore(applicationContext).getOrCreate(),
+            apiTokenProvider = tokenStore::getOrCreate,
             captureProvider = captureManager,
         )
         runCatching(server::startServer)

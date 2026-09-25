@@ -1,5 +1,7 @@
 package com.tapbot.agent.api
 
+import com.tapbot.agent.accessibility.UiNodeSnapshot
+import com.tapbot.agent.accessibility.UiTreeSnapshot
 import com.tapbot.agent.state.AgentState
 import com.tapbot.agent.capture.ScreenCaptureStatus
 import com.tapbot.agent.capture.ScreenFrame
@@ -9,6 +11,25 @@ import org.json.JSONObject
 import java.time.Instant
 
 object ApiModels {
+    fun uiTree(requestId: String, snapshot: UiTreeSnapshot): JSONObject =
+        successObject(requestId).apply {
+            put("captured_at", snapshot.capturedAt)
+            put("package_name", snapshot.packageName ?: JSONObject.NULL)
+            put("window_title", snapshot.windowTitle ?: JSONObject.NULL)
+            put("rotation", snapshot.rotation)
+            put("screen_width", snapshot.screenWidth)
+            put("screen_height", snapshot.screenHeight)
+            put("node_count", snapshot.nodes.size)
+            put("truncated", snapshot.truncated)
+            put("root", uiNode(snapshot.root, includeChildren = true))
+            put(
+                "nodes",
+                JSONArray().apply {
+                    snapshot.nodes.forEach { put(uiNode(it, includeChildren = false)) }
+                },
+            )
+        }
+
     fun status(requestId: String, state: AgentState, device: DeviceInfo): JSONObject =
         successObject(requestId).apply {
         put("remote_control_enabled", state.remoteControlEnabled)
@@ -111,5 +132,43 @@ object ApiModels {
         .put("request_id", requestId)
         .put("error", JSONObject.NULL)
 
-    private const val AGENT_VERSION = "0.1.0"
+    private fun uiNode(node: UiNodeSnapshot, includeChildren: Boolean): JSONObject =
+        JSONObject().apply {
+            put("node_id", node.nodeId)
+            put("parent_id", node.parentId ?: JSONObject.NULL)
+            put("depth", node.depth)
+            put("class_name", node.className ?: JSONObject.NULL)
+            put("text", node.text ?: JSONObject.NULL)
+            put("content_description", node.contentDescription ?: JSONObject.NULL)
+            put("view_id_resource_name", node.viewIdResourceName ?: JSONObject.NULL)
+            put("package_name", node.packageName ?: JSONObject.NULL)
+            put("bounds", JSONObject().apply {
+                put("left", node.bounds.left)
+                put("top", node.bounds.top)
+                put("right", node.bounds.right)
+                put("bottom", node.bounds.bottom)
+            })
+            put("clickable", node.clickable)
+            put("enabled", node.enabled)
+            put("focusable", node.focusable)
+            put("focused", node.focused)
+            put("selected", node.selected)
+            put("checked", node.checked)
+            put("checkable", node.checkable)
+            put("scrollable", node.scrollable)
+            put("editable", node.editable)
+            put("visible_to_user", node.visibleToUser)
+            put("password", node.password)
+            put("child_count", node.childCount)
+            if (includeChildren) {
+                put(
+                    "children",
+                    JSONArray().apply {
+                        node.children.forEach { put(uiNode(it, includeChildren = true)) }
+                    },
+                )
+            }
+        }
+
+    private const val AGENT_VERSION = "0.3.0"
 }

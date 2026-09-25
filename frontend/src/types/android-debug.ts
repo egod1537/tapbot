@@ -46,6 +46,8 @@ export interface AndroidStreamStatus {
 }
 
 export interface AndroidProxyStatus {
+  device_id: string
+  name: string
   configured: boolean
   connected: boolean
   error: string | null
@@ -65,6 +67,8 @@ export interface AndroidFrameMetadata {
 }
 
 export interface AndroidDebugState {
+  device_id: string
+  source_id: string
   state: {
     current: string
     previous: string | null
@@ -78,6 +82,14 @@ export interface AndroidDebugState {
   frame: AndroidFrameMetadata | null
   detections: VisionDetection[]
   vision_latency_ms: number | null
+  ui_tree?: {
+    available: boolean
+    captured_at: string | null
+    package_name: string | null
+    node_count: number
+    truncated: boolean
+    error: string | null
+  }
   decision: {
     classifier: { state: string; confidence: number }
     vlm: Record<string, unknown> | null
@@ -97,11 +109,86 @@ export interface AndroidDebugState {
 
 export interface AndroidScreenshotSaveResult {
   ok: true
+  device_id: string
   frame: AndroidFrameMetadata
   path: string
 }
 
 export interface AndroidPrimitiveResult {
   ok: true
+  device_id: string
   result: Record<string, unknown>
+}
+
+export interface AndroidPointerPoint {
+  x: number
+  y: number
+  t_ms: number
+}
+
+export interface AndroidUiBounds {
+  left: number
+  top: number
+  right: number
+  bottom: number
+}
+
+export interface AndroidUiNode {
+  node_id: string
+  parent_id: string | null
+  depth: number
+  class_name: string | null
+  text: string | null
+  content_description: string | null
+  view_id_resource_name: string | null
+  package_name: string | null
+  bounds: AndroidUiBounds
+  clickable: boolean
+  enabled: boolean
+  focusable: boolean
+  focused: boolean
+  selected: boolean
+  checked: boolean
+  checkable: boolean
+  scrollable: boolean
+  editable: boolean
+  visible_to_user: boolean
+  password: boolean
+  child_count: number
+  children?: AndroidUiNode[]
+}
+
+export interface AndroidUiTree {
+  ok: true
+  request_id: string
+  device_id: string
+  source_id: string
+  captured_at: string
+  package_name: string | null
+  window_title: string | null
+  rotation: number
+  screen_width: number
+  screen_height: number
+  node_count: number
+  truncated: boolean
+  root: AndroidUiNode
+  nodes: AndroidUiNode[]
+}
+
+export interface AndroidDeviceSummary {
+  id: string
+  name: string
+  connected: boolean
+  last_seen_at: string | null
+  capture_ready: boolean
+  stream_running: boolean
+  accessibility_enabled: boolean
+  remote_control_enabled: boolean
+  macro_status: MacroStatus
+  last_error: string | null
+}
+
+export interface AndroidDevicesResponse {
+  devices: AndroidDeviceSummary[]
+  default_device_id: string | null
 }

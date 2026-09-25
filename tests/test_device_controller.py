@@ -1,5 +1,6 @@
 from tapbot.android.client import AndroidActionResult
 from tapbot.device import AndroidRemoteController, RobotTapController
+from tapbot.device.gesture import PointerGesture, PointerPoint
 from tapbot.robot.mock import MockRobotController
 
 
@@ -10,6 +11,13 @@ class StubAndroidClient:
 
     def swipe(self, *args: object, **kwargs: object) -> AndroidActionResult:
         return AndroidActionResult("request-2", "action-2", "swipe", "completed")
+
+    def gesture(self, gesture: PointerGesture) -> AndroidActionResult:
+        assert gesture.points == (
+            PointerPoint(10, 20, 0),
+            PointerPoint(10, 20, 70),
+        )
+        return AndroidActionResult("request-1", "action-1", "gesture", "completed")
 
     def back(self) -> AndroidActionResult:
         return AndroidActionResult("request-3", "action-3", "back", "dispatched")
@@ -62,3 +70,22 @@ def test_robot_adapter_accepts_existing_calibration_point_shape() -> None:
     RobotTapController(robot, PointMapper()).tap(10, 20)
 
     assert robot.commands == [("tap", 11, 22)]
+
+
+def test_robot_pointer_gesture_follows_trajectory_with_pen_lifecycle() -> None:
+    robot = MockRobotController()
+    controller = RobotTapController(robot, DoubleMapper())
+    gesture = PointerGesture.from_points(
+        (PointerPoint(1, 2, 0), PointerPoint(3, 4, 100)),
+        started_at_ms=0,
+    )
+
+    result = controller.execute_gesture(gesture)
+
+    assert result.command == "gesture"
+    assert robot.commands == [
+        ("move_to", 2, 4),
+        ("pen_down",),
+        ("move_to", 6, 8),
+        ("pen_up",),
+    ]
