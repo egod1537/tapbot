@@ -178,6 +178,7 @@ describe('multi-device Android debug UI', () => {
     act(() => {
       result.current.setSelectedDetectionId('old-selection')
       result.current.setHighlightedDetectionId('old-highlight')
+      result.current.setSelectedUiNodeId('old-ui-node')
     })
 
     rerender({ deviceId: 'device-b' })
@@ -186,6 +187,7 @@ describe('multi-device Android debug UI', () => {
     expect(signals[0]?.aborted).toBe(true)
     expect(result.current.selectedDetectionId).toBeNull()
     expect(result.current.highlightedDetectionId).toBeNull()
+    expect(result.current.selectedUiNodeId).toBeNull()
     expect(result.current.debug?.device_id ?? null).not.toBe('device-a')
   })
 

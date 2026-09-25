@@ -89,6 +89,11 @@ tap으로, 나머지는 gesture로 처리합니다. 경로는 4px 또는 12ms �
 최대 256개 점으로 resample하며 device 전환, pointer cancel, stream disconnect 시 진행
 중인 기록을 폐기합니다.
 
+Live viewport는 last-known device geometry를 유지하는 독립 aspect-ratio stage입니다.
+stream/screenshot, online/offline 전환은 동일한 image/overlay slot 안에서만 일어나며,
+message와 Debug State는 별도 scroll panel에 표시됩니다. Gesture recording 중에는
+pointerdown 시점의 stage bounds와 frame geometry를 pointerup까지 고정합니다.
+
 멀티 디바이스 설정은 `TAPBOT_ANDROID_DEVICES_CONFIG`에 JSON 경로를 지정합니다.
 `config/android-devices.example.json`을 복사하되 실제 token 파일은 commit하지
 마세요. 각 token은 `TAPBOT_ANDROID_DEVICE_<DEVICE_ID>_TOKEN` 환경변수로 덮어쓸 수

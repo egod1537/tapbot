@@ -4,6 +4,7 @@ import type {
   AndroidDebugState,
   AndroidPointerPoint,
   AndroidProxyStatus,
+  AndroidUiNode,
   AndroidUiTree,
 } from '../../types/android-debug'
 import type { TimelineEvent } from '../../types/timeline'
@@ -20,12 +21,23 @@ function message(error: unknown): string {
   return 'Android debug request failed.'
 }
 
+function uiNodeFingerprint(node: AndroidUiNode): string {
+  return JSON.stringify([
+    node.view_id_resource_name,
+    node.content_description,
+    node.text,
+    node.class_name,
+    node.depth,
+  ])
+}
+
 export function useAndroidDebug(deviceId: string | null) {
   const [status, setStatus] = useState<AndroidProxyStatus | null>(null)
   const [debug, setDebug] = useState<AndroidDebugState | null>(null)
   const [events, setEvents] = useState<TimelineEvent[]>([])
   const [uiTree, setUiTree] = useState<AndroidUiTree | null>(null)
   const [uiTreeError, setUiTreeError] = useState<string | null>(null)
+  const [uiTreeLoading, setUiTreeLoading] = useState(false)
   const [selectedUiNodeId, setSelectedUiNodeId] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [notice, setNotice] = useState<string | null>(null)
@@ -38,7 +50,9 @@ export function useAndroidDebug(deviceId: string | null) {
   const [streamNonce, setStreamNonce] = useState(() => Date.now())
   const [streamFailed, setStreamFailed] = useState(false)
   const visionInFlight = useRef(false)
-  const uiTreeRequestId = useRef<string | null>(null)
+  const uiTreeInFlight = useRef(false)
+  const uiTreeRef = useRef<AndroidUiTree | null>(null)
+  const selectedUiNodeFingerprint = useRef<string | null>(null)
   const deviceGeneration = useRef(0)
   const activeStatus = status?.device_id === deviceId ? status : null
   const activeDebug = debug?.device_id === deviceId ? debug : null
@@ -53,8 +67,11 @@ export function useAndroidDebug(deviceId: string | null) {
       setEvents([])
       setUiTree(null)
       setUiTreeError(null)
+      setUiTreeLoading(false)
       setSelectedUiNodeId(null)
-      uiTreeRequestId.current = null
+      uiTreeInFlight.current = false
+      uiTreeRef.current = null
+      selectedUiNodeFingerprint.current = null
       setError(null)
       setNotice(null)
       setBusy(null)
@@ -155,6 +172,35 @@ export function useAndroidDebug(deviceId: string | null) {
     }
   }, [activeStatus?.agent?.capture_ready, activeStatus?.connected, deviceId])
 
+  const refreshUiTree = useCallback(
+    async (signal?: AbortSignal) => {
+      if (!deviceId || uiTreeInFlight.current) return
+      uiTreeInFlight.current = true
+      setUiTreeLoading(true)
+      try {
+        const next = await androidApi.uiTree(deviceId, signal)
+        if (signal?.aborted) return
+        uiTreeRef.current = next
+        const fingerprint = selectedUiNodeFingerprint.current
+        if (fingerprint) {
+          const restored = next.nodes.find(
+            (node) => uiNodeFingerprint(node) === fingerprint,
+          )
+          setSelectedUiNodeId(restored?.node_id ?? null)
+          if (!restored) selectedUiNodeFingerprint.current = null
+        }
+        setUiTree(next)
+        setUiTreeError(null)
+      } catch (caught) {
+        if (!signal?.aborted) setUiTreeError(message(caught))
+      } finally {
+        uiTreeInFlight.current = false
+        if (!signal?.aborted) setUiTreeLoading(false)
+      }
+    },
+    [deviceId],
+  )
+
   useEffect(() => {
     if (
       !deviceId ||
@@ -163,27 +209,25 @@ export function useAndroidDebug(deviceId: string | null) {
     )
       return
     const controller = new AbortController()
-    const refresh = async () => {
-      try {
-        const next = await androidApi.uiTree(deviceId, controller.signal)
-        if (uiTreeRequestId.current !== next.request_id) {
-          setSelectedUiNodeId(null)
-          uiTreeRequestId.current = next.request_id
-        }
-        setUiTree(next)
-        setUiTreeError(null)
-      } catch (caught) {
-        if (!controller.signal.aborted) setUiTreeError(message(caught))
-      }
-    }
-    const firstRequest = window.setTimeout(() => void refresh(), 0)
-    const timer = window.setInterval(() => void refresh(), UI_TREE_INTERVAL_MS)
+    const firstRequest = window.setTimeout(
+      () => void refreshUiTree(controller.signal),
+      0,
+    )
+    const timer = window.setInterval(
+      () => void refreshUiTree(controller.signal),
+      UI_TREE_INTERVAL_MS,
+    )
     return () => {
       controller.abort()
       window.clearTimeout(firstRequest)
       window.clearInterval(timer)
     }
-  }, [activeStatus?.agent?.accessibility_enabled, activeStatus?.connected, deviceId])
+  }, [
+    activeStatus?.agent?.accessibility_enabled,
+    activeStatus?.connected,
+    deviceId,
+    refreshUiTree,
+  ])
 
   const action = useCallback(
     async (name: string, operation: () => Promise<unknown>) => {
@@ -199,15 +243,21 @@ export function useAndroidDebug(deviceId: string | null) {
           setDebug(result as AndroidDebugState)
         }
         setNotice(`${name} completed.`)
-        await Promise.all([refreshStatus(), refreshDebug()])
+        await Promise.all([refreshStatus(), refreshDebug(), refreshUiTree()])
       } catch (caught) {
         if (generation === deviceGeneration.current) setError(message(caught))
       } finally {
         if (generation === deviceGeneration.current) setBusy(null)
       }
     },
-    [busy, deviceId, refreshDebug, refreshStatus],
+    [busy, deviceId, refreshDebug, refreshStatus, refreshUiTree],
   )
+
+  const selectUiNode = useCallback((nodeId: string | null) => {
+    setSelectedUiNodeId(nodeId)
+    const selected = uiTreeRef.current?.nodes.find((node) => node.node_id === nodeId)
+    selectedUiNodeFingerprint.current = selected ? uiNodeFingerprint(selected) : null
+  }, [])
 
   const tap = useCallback(
     async (x: number, y: number) => {
@@ -237,6 +287,7 @@ export function useAndroidDebug(deviceId: string | null) {
     events: events.filter((event) => event.payload.device_id === deviceId),
     uiTree: activeUiTree,
     uiTreeError,
+    uiTreeLoading,
     selectedUiNodeId,
     error,
     notice,
@@ -249,9 +300,10 @@ export function useAndroidDebug(deviceId: string | null) {
     setManualTapEnabled,
     setSelectedDetectionId,
     setHighlightedDetectionId,
-    setSelectedUiNodeId,
+    setSelectedUiNodeId: selectUiNode,
     setStreamFailed,
     reconnectStream,
+    refreshUiTree,
     tap,
     gesture,
     saveScreenshot: () =>
