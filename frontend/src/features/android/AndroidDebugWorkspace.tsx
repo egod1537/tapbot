@@ -21,6 +21,13 @@ import type {
 import type { VisionDetection } from '../../types/vision'
 import { androidApi } from './android-api'
 import { appendSampledPoint, isTapPath, mapPointerToFrame } from './pointer-gesture'
+import {
+  buildCompressedHierarchy,
+  countCompressedRows,
+  isActionableUiNode,
+  isMeaningfulUiNode,
+} from './ui-tree/hierarchy-compression'
+import type { CompressedHierarchyRow } from './ui-tree/hierarchy-compression'
 import type { AndroidDebugController } from './useAndroidDebug'
 
 interface AndroidDebugWorkspaceProps {
@@ -450,7 +457,11 @@ export function AndroidDebugWorkspace({
       </div>
 
       <div className="android-debug-grid">
-        <Card className="android-live-card" elevation={Elevation.ONE}>
+        <Card
+          className="android-live-card"
+          elevation={Elevation.ONE}
+          data-editor-pane="live"
+        >
           <header className="android-card-heading">
             <div>
               <span>Canonical source</span>
@@ -607,25 +618,39 @@ export function AndroidDebugWorkspace({
           </div>
         </Card>
 
-        <div className="android-debug-side-panel">
-          <AndroidInspectorPanel
+        <Card
+          className="android-hierarchy-pane"
+          elevation={Elevation.ONE}
+          data-editor-pane="hierarchy"
+        >
+          <UiTreeHierarchy
             key={controller.deviceId ?? 'no-device'}
             controller={controller}
-            selectedUiNode={selectedUiNode}
-            selectedDetection={selected}
-            frameWidth={frameWidth}
-            frameHeight={frameHeight}
             onHoverNode={setHoveredUiNodeId}
           />
-        </div>
+        </Card>
+
+        <Card
+          className="android-node-inspector-pane"
+          elevation={Elevation.ONE}
+          data-editor-pane="inspector"
+        >
+          <UiNodeInspector
+            controller={controller}
+            node={selectedUiNode}
+            frameWidth={frameWidth}
+            frameHeight={frameHeight}
+          />
+          <InspectorMessages controller={controller} />
+        </Card>
       </div>
 
-      <AndroidConsolePanel controller={controller} />
+      <AndroidConsolePanel controller={controller} selectedDetection={selected} />
     </section>
   )
 }
 
-type InspectorTab = 'ui' | 'vision' | 'macro'
+type ConsoleTab = 'console' | 'vision' | 'macro'
 
 function shortClassName(className: string | null): string {
   return className?.split('.').at(-1) ?? 'Node'
@@ -691,71 +716,6 @@ function preferredSelector(node: AndroidUiNode): string {
   return `snapshotNode == ${JSON.stringify(node.node_id)}`
 }
 
-function AndroidInspectorPanel({
-  controller,
-  selectedUiNode,
-  selectedDetection,
-  frameWidth,
-  frameHeight,
-  onHoverNode,
-}: {
-  controller: AndroidDebugController
-  selectedUiNode: AndroidUiNode | null
-  selectedDetection: VisionDetection | null
-  frameWidth: number
-  frameHeight: number
-  onHoverNode: (nodeId: string | null) => void
-}) {
-  const [tab, setTab] = useState<InspectorTab>('ui')
-  return (
-    <Card className="android-inspector-panel" elevation={Elevation.ONE}>
-      <header className="android-card-heading android-inspector-heading">
-        <div>
-          <span>Android automation editor</span>
-          <strong>Inspector</strong>
-        </div>
-        <Tag intent={controller.uiTree ? 'success' : 'warning'} minimal>
-          UI TREE {controller.uiTree ? 'READY' : '—'}
-        </Tag>
-      </header>
-      <div className="android-inspector-tabs" role="tablist" aria-label="Inspector">
-        {(['ui', 'vision', 'macro'] as const).map((value) => (
-          <Button
-            key={value}
-            minimal
-            active={tab === value}
-            role="tab"
-            aria-selected={tab === value}
-            text={value === 'ui' ? 'UI' : value === 'vision' ? 'Vision' : 'Macro'}
-            onClick={() => setTab(value)}
-          />
-        ))}
-      </div>
-      <InspectorMessages controller={controller} />
-      <div className="android-inspector-content">
-        {tab === 'ui' && (
-          <div className="android-ui-editor" key={controller.deviceId ?? 'none'}>
-            <UiTreeHierarchy controller={controller} onHoverNode={onHoverNode} />
-            <UiNodeInspector
-              controller={controller}
-              node={selectedUiNode}
-              frameWidth={frameWidth}
-              frameHeight={frameHeight}
-            />
-          </div>
-        )}
-        {tab === 'vision' && (
-          <VisionInspector
-            controller={controller}
-            selectedDetection={selectedDetection}
-          />
-        )}
-        {tab === 'macro' && <MacroInspector controller={controller} />}
-      </div>
-    </Card>
-  )
-}
-
 function InspectorMessages({ controller }: { controller: AndroidDebugController }) {
   const { status } = controller
   return (
@@ -791,33 +751,59 @@ function UiTreeHierarchy({
   const [visibleOnly, setVisibleOnly] = useState(true)
   const [clickableOnly, setClickableOnly] = useState(false)
   const [enabledOnly, setEnabledOnly] = useState(false)
+  const [compressChains, setCompressChains] = useState(true)
   const [expanded, setExpanded] = useState<Set<string>>(() => new Set())
   const normalized = query.trim().toLocaleLowerCase()
-  const tree = controller.uiTree
-    ? hierarchyRoot(controller.uiTree.root, controller.uiTree.nodes)
-    : null
+  const tree = useMemo(
+    () =>
+      controller.uiTree
+        ? hierarchyRoot(controller.uiTree.root, controller.uiTree.nodes)
+        : null,
+    [controller.uiTree],
+  )
 
-  const passesFilters = (node: AndroidUiNode) =>
+  const isResult = (node: AndroidUiNode) =>
     (!visibleOnly || node.visible_to_user) &&
     (!clickableOnly || node.clickable) &&
-    (!enabledOnly || node.enabled)
-  const isResult = (node: AndroidUiNode) =>
-    passesFilters(node) && nodeMatches(node, normalized)
-  const visibleBranchIds = new Set<string>()
-  const selectedBranchIds = new Set<string>()
-  if (tree) {
-    collectMatchingBranches(tree, isResult, visibleBranchIds)
+    (!enabledOnly || node.enabled) &&
+    nodeMatches(node, normalized)
+  const hierarchy = useMemo(() => {
+    if (!tree) return null
+    const visibleBranchIds = new Set<string>()
+    const selectedBranchIds = new Set<string>()
+    const result = (node: AndroidUiNode) =>
+      (!visibleOnly || node.visible_to_user) &&
+      (!clickableOnly || node.clickable) &&
+      (!enabledOnly || node.enabled) &&
+      nodeMatches(node, normalized)
+    collectMatchingBranches(tree, result, visibleBranchIds)
     collectMatchingBranches(
       tree,
       (candidate) => candidate.node_id === controller.selectedUiNodeId,
       selectedBranchIds,
     )
-  }
-  const isVisibleBranch = (node: AndroidUiNode) => visibleBranchIds.has(node.node_id)
-  const selectedInBranch = (node: AndroidUiNode) => selectedBranchIds.has(node.node_id)
+    if (!visibleBranchIds.has(tree.node_id)) {
+      return { root: null, selectedBranchIds, rowCount: 0 }
+    }
+    const root = buildCompressedHierarchy(tree, {
+      compress: compressChains,
+      includeNode: (node) => visibleBranchIds.has(node.node_id),
+    })
+    return { root, selectedBranchIds, rowCount: countCompressedRows(root) }
+  }, [
+    clickableOnly,
+    compressChains,
+    controller.selectedUiNodeId,
+    enabledOnly,
+    normalized,
+    tree,
+    visibleOnly,
+  ])
 
-  const toggleExpanded = (node: AndroidUiNode) => {
-    const key = nodeFingerprint(node)
+  const toggleExpanded = (row: CompressedHierarchyRow) => {
+    const terminal = row.chain.at(-1)
+    if (!terminal) return
+    const key = nodeFingerprint(terminal)
     setExpanded((current) => {
       const next = new Set(current)
       if (next.has(key)) next.delete(key)
@@ -847,6 +833,7 @@ function UiTreeHierarchy({
       </header>
       <div className="android-tree-status">
         <span>{controller.uiTree?.node_count ?? 0} nodes</span>
+        {hierarchy?.root && <span>· {hierarchy.rowCount} rows</span>}
         <span>
           {controller.uiTree?.captured_at
             ? new Date(controller.uiTree.captured_at).toLocaleTimeString()
@@ -890,6 +877,14 @@ function UiTreeHierarchy({
           />
           Enabled
         </label>
+        <label className="android-tree-compression-toggle">
+          <input
+            type="checkbox"
+            checked={compressChains}
+            onChange={(event) => setCompressChains(event.currentTarget.checked)}
+          />
+          Compress chains
+        </label>
       </div>
       <div className="android-hierarchy-scroll">
         {controller.uiTreeLoading && !tree && (
@@ -900,15 +895,14 @@ function UiTreeHierarchy({
             {controller.uiTreeError}
           </Callout>
         )}
-        {tree && isVisibleBranch(tree) && (
-          <HierarchyNodeRow
-            node={tree}
+        {hierarchy?.root && (
+          <CompressedHierarchyRowView
+            row={hierarchy.root}
             depth={0}
             expanded={expanded}
             searchActive={Boolean(normalized)}
             isResult={isResult}
-            isVisibleBranch={isVisibleBranch}
-            selectedInBranch={selectedInBranch}
+            selectedBranchIds={hierarchy.selectedBranchIds}
             selectedNodeId={controller.selectedUiNodeId}
             onToggle={toggleExpanded}
             onSelect={controller.setSelectedUiNodeId}
@@ -918,7 +912,7 @@ function UiTreeHierarchy({
         {!controller.uiTreeLoading && !controller.uiTreeError && !tree && (
           <div className="android-panel-empty">No UI tree snapshot.</div>
         )}
-        {tree && !isVisibleBranch(tree) && (
+        {tree && !hierarchy?.root && (
           <div className="android-panel-empty">No matching UI nodes.</div>
         )}
       </div>
@@ -926,90 +920,107 @@ function UiTreeHierarchy({
   )
 }
 
-function HierarchyNodeRow({
-  node,
+function CompressedHierarchyRowView({
+  row,
   depth,
   expanded,
   searchActive,
   isResult,
-  isVisibleBranch,
-  selectedInBranch,
+  selectedBranchIds,
   selectedNodeId,
   onToggle,
   onSelect,
   onHover,
 }: {
-  node: AndroidUiNode
+  row: CompressedHierarchyRow
   depth: number
   expanded: Set<string>
   searchActive: boolean
   isResult: (node: AndroidUiNode) => boolean
-  isVisibleBranch: (node: AndroidUiNode) => boolean
-  selectedInBranch: (node: AndroidUiNode) => boolean
+  selectedBranchIds: Set<string>
   selectedNodeId: string | null
-  onToggle: (node: AndroidUiNode) => void
+  onToggle: (row: CompressedHierarchyRow) => void
   onSelect: (nodeId: string | null) => void
   onHover: (nodeId: string | null) => void
 }) {
-  const children = (node.children ?? []).filter(isVisibleBranch)
-  const key = nodeFingerprint(node)
+  const terminal = row.chain.at(-1)
+  if (!terminal) return null
+  const key = nodeFingerprint(terminal)
   const open =
-    depth === 0 || searchActive || expanded.has(key) || selectedInBranch(node)
-  const selected = node.node_id === selectedNodeId
+    searchActive ||
+    selectedBranchIds.has(row.terminalNodeId) ||
+    (depth === 0 ? !expanded.has(key) : expanded.has(key))
+  const rowLabel = row.chain.map((node) => nodeTitle(node)).join(' / ')
   return (
     <div className="android-hierarchy-branch">
       <div
-        className={[
-          'android-hierarchy-row',
-          selected ? 'is-selected' : '',
-          !node.visible_to_user || !node.enabled ? 'is-muted' : '',
-          isResult(node) && searchActive ? 'is-search-match' : '',
-        ]
-          .filter(Boolean)
-          .join(' ')}
+        className="android-hierarchy-row android-compressed-hierarchy-row"
         style={{ paddingLeft: `${(depth * 14).toString()}px` }}
-        onMouseEnter={() => onHover(node.node_id)}
-        onMouseLeave={() => onHover(null)}
       >
         <button
           className="android-tree-chevron"
           type="button"
-          aria-label={`${open ? 'Collapse' : 'Expand'} ${nodeTitle(node)}`}
-          disabled={children.length === 0}
-          onClick={() => onToggle(node)}
+          aria-label={`${open ? 'Collapse' : 'Expand'} ${rowLabel}`}
+          disabled={row.children.length === 0}
+          onClick={() => onToggle(row)}
         >
-          {children.length ? (open ? '▾' : '▸') : '·'}
+          {row.children.length ? (open ? '▾' : '▸') : '·'}
         </button>
-        <button
-          className="android-tree-node-button"
-          type="button"
-          onClick={() => onSelect(node.node_id)}
-        >
-          <span className="android-tree-node-icon" aria-hidden="true">
-            {node.clickable ? '◆' : node.scrollable ? '↕' : '◇'}
-          </span>
-          <span className="android-tree-node-class">
-            {shortClassName(node.class_name)}
-          </span>
-          {(node.text || node.content_description) && (
-            <span className="android-tree-node-preview">
-              “{node.text ?? node.content_description}”
-            </span>
-          )}
-          {node.clickable && <span className="android-tree-node-flag">C</span>}
-        </button>
+        <div className="android-tree-chain" aria-label={rowLabel}>
+          {row.chain.map((node, index) => {
+            const content = node.text?.trim() || node.content_description?.trim()
+            const selected = node.node_id === selectedNodeId
+            const actionable = isActionableUiNode(node)
+            const meaningful = isMeaningfulUiNode(node)
+            return (
+              <span key={node.node_id} className="android-tree-chain-item">
+                {index > 0 && (
+                  <span className="android-tree-chain-separator" aria-hidden="true">
+                    /
+                  </span>
+                )}
+                <button
+                  className={[
+                    'android-tree-segment',
+                    selected ? 'is-selected' : '',
+                    searchActive && isResult(node) ? 'is-search-match' : '',
+                    actionable ? 'is-actionable' : '',
+                    !actionable && !meaningful ? 'is-wrapper' : '',
+                    !node.visible_to_user || !node.enabled ? 'is-muted' : '',
+                  ]
+                    .filter(Boolean)
+                    .join(' ')}
+                  type="button"
+                  title={`${node.class_name ?? 'Unknown class'}\nnode_id=${node.node_id}\nbounds=[${node.bounds.left}, ${node.bounds.top}, ${node.bounds.right}, ${node.bounds.bottom}]`}
+                  onClick={() => onSelect(node.node_id)}
+                  onMouseEnter={() => onHover(node.node_id)}
+                  onMouseLeave={() => onHover(null)}
+                >
+                  <span>{shortClassName(node.class_name)}</span>
+                  {content && (
+                    <span className="android-tree-segment-preview">
+                      “{content.length > 32 ? `${content.slice(0, 32)}…` : content}”
+                    </span>
+                  )}
+                </button>
+              </span>
+            )
+          })}
+        </div>
+        {row.children.length > 0 && (
+          <span className="android-tree-child-count">{row.children.length}</span>
+        )}
       </div>
       {open &&
-        children.map((child) => (
-          <HierarchyNodeRow
-            key={child.node_id}
-            node={child}
+        row.children.map((child) => (
+          <CompressedHierarchyRowView
+            key={child.id}
+            row={child}
             depth={depth + 1}
             expanded={expanded}
             searchActive={searchActive}
             isResult={isResult}
-            isVisibleBranch={isVisibleBranch}
-            selectedInBranch={selectedInBranch}
+            selectedBranchIds={selectedBranchIds}
             selectedNodeId={selectedNodeId}
             onToggle={onToggle}
             onSelect={onSelect}
@@ -1230,35 +1241,72 @@ function MacroInspector({ controller }: { controller: AndroidDebugController }) 
   )
 }
 
-function AndroidConsolePanel({ controller }: { controller: AndroidDebugController }) {
+function AndroidConsolePanel({
+  controller,
+  selectedDetection,
+}: {
+  controller: AndroidDebugController
+  selectedDetection: VisionDetection | null
+}) {
+  const [tab, setTab] = useState<ConsoleTab>('console')
   return (
     <Card className="android-console-panel" elevation={Elevation.ONE}>
       <header className="android-card-heading">
         <div>
-          <span>Recent activity</span>
-          <strong>Console</strong>
+          <span>Bounded bottom panel</span>
+          <strong>
+            {tab === 'console' ? 'Console' : tab === 'vision' ? 'Vision' : 'Macro'}
+          </strong>
         </div>
-        <Tag round minimal>
-          {controller.events.length}
-        </Tag>
+        <div className="android-console-tabs" role="tablist" aria-label="Bottom panel">
+          {(['console', 'vision', 'macro'] as const).map((value) => (
+            <Button
+              key={value}
+              minimal
+              small
+              active={tab === value}
+              role="tab"
+              aria-selected={tab === value}
+              text={
+                value === 'console'
+                  ? `Console (${controller.events.length.toString()})`
+                  : value === 'vision'
+                    ? 'Vision'
+                    : 'Macro'
+              }
+              onClick={() => setTab(value)}
+            />
+          ))}
+        </div>
       </header>
-      <div className="android-event-list">
-        {controller.events.length ? (
-          controller.events.map((event) => (
-            <div key={event.id} className={`android-event-row is-${event.status}`}>
-              <time>{new Date(event.timestamp).toLocaleTimeString()}</time>
-              <Tag minimal>{event.category}</Tag>
-              <span>{event.message}</span>
-              <small>
-                {event.latency_ms === null
-                  ? event.status
-                  : `${event.latency_ms.toFixed(1)} ms`}
-              </small>
-            </div>
-          ))
-        ) : (
-          <div className="android-panel-empty">No debug events yet.</div>
+      <div className="android-console-content">
+        {tab === 'console' && (
+          <div className="android-event-list">
+            {controller.events.length ? (
+              controller.events.map((event) => (
+                <div key={event.id} className={`android-event-row is-${event.status}`}>
+                  <time>{new Date(event.timestamp).toLocaleTimeString()}</time>
+                  <Tag minimal>{event.category}</Tag>
+                  <span>{event.message}</span>
+                  <small>
+                    {event.latency_ms === null
+                      ? event.status
+                      : `${event.latency_ms.toFixed(1)} ms`}
+                  </small>
+                </div>
+              ))
+            ) : (
+              <div className="android-panel-empty">No debug events yet.</div>
+            )}
+          </div>
         )}
+        {tab === 'vision' && (
+          <VisionInspector
+            controller={controller}
+            selectedDetection={selectedDetection}
+          />
+        )}
+        {tab === 'macro' && <MacroInspector controller={controller} />}
       </div>
     </Card>
   )

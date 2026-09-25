@@ -212,6 +212,28 @@ afterEach(() => {
 })
 
 describe('Android live viewport layout stability', () => {
+  it('renders live, hierarchy, and inspector as three sibling editor panes', () => {
+    const view = render(
+      <AndroidDebugWorkspace
+        controller={controller({ uiTree: tree(3) })}
+        devices={devices}
+        onDeviceChange={vi.fn()}
+      />,
+    )
+    const grid = view.container.querySelector('.android-debug-grid')
+    const panes = Array.from(grid?.children ?? []).filter((element) =>
+      element.hasAttribute('data-editor-pane'),
+    )
+
+    expect(panes.map((pane) => pane.getAttribute('data-editor-pane'))).toEqual([
+      'live',
+      'hierarchy',
+      'inspector',
+    ])
+    expect(panes[1]?.contains(panes[2] ?? null)).toBe(false)
+    expect(panes[1]?.parentElement).toBe(panes[2]?.parentElement)
+  })
+
   it('preserves the same viewport through status, message, overlay, and tree updates', async () => {
     const view = render(
       <AndroidDebugWorkspace
@@ -239,7 +261,7 @@ describe('Android live viewport layout stability', () => {
     expect(stage?.querySelector('img')).toBe(image)
     expect(stage?.querySelector('svg')).toBe(overlay)
     expect(
-      view.container.querySelector('.android-debug-side-panel .bp6-callout'),
+      view.container.querySelector('.android-node-inspector-pane .bp6-callout'),
     ).toBeTruthy()
 
     view.rerender(
@@ -396,6 +418,61 @@ describe('Unity-style UI tree inspector', () => {
     }
   }
 
+  const compressedTree = (): AndroidUiTree => {
+    const root = {
+      ...node(0),
+      class_name: 'android.widget.FrameLayout',
+      text: null,
+      clickable: false,
+      child_count: 1,
+    }
+    const linear = {
+      ...node(1),
+      parent_id: root.node_id,
+      depth: 1,
+      class_name: 'android.widget.LinearLayout',
+      text: null,
+      clickable: false,
+      child_count: 1,
+      bounds: { left: 10, top: 10, right: 190, bottom: 90 },
+    }
+    const frame = {
+      ...node(2),
+      parent_id: linear.node_id,
+      depth: 2,
+      class_name: 'android.widget.FrameLayout',
+      text: null,
+      clickable: false,
+      child_count: 1,
+    }
+    const webView = {
+      ...node(3),
+      parent_id: frame.node_id,
+      depth: 3,
+      class_name: 'android.webkit.WebView',
+      text: null,
+      clickable: false,
+      child_count: 1,
+    }
+    const action = {
+      ...node(4),
+      parent_id: webView.node_id,
+      depth: 4,
+      class_name: 'android.widget.Button',
+      text: 'Reserve',
+      bounds: { left: 50, top: 25, right: 150, bottom: 75 },
+    }
+    webView.children = [action]
+    frame.children = [webView]
+    linear.children = [frame]
+    root.children = [linear]
+    return {
+      ...tree(5),
+      root,
+      nodes: [root, linear, frame, webView, action],
+    }
+  }
+
   it('expands hierarchy rows, searches fields, and applies visibility filters', () => {
     const snapshot = nestedTree({ hiddenLeaf: true })
     const view = render(
@@ -453,6 +530,64 @@ describe('Unity-style UI tree inspector', () => {
     expect(view.getByDisplayValue(/viewId == "example:id\/button2"/)).toBeTruthy()
     fireEvent.click(view.getByRole('button', { name: 'Tap Center' }))
     expect(tap).toHaveBeenCalledWith(100, 45)
+  })
+
+  it('selects and searches chain segments and collapses the terminal subtree', () => {
+    const snapshot = compressedTree()
+    const setSelectedUiNodeId = vi.fn()
+    const view = render(
+      <AndroidDebugWorkspace
+        controller={controller({ uiTree: snapshot, setSelectedUiNodeId })}
+        devices={devices}
+        onDeviceChange={vi.fn()}
+      />,
+    )
+
+    expect(view.container.querySelectorAll('.android-hierarchy-row')).toHaveLength(2)
+    expect(view.container.querySelectorAll('.android-tree-segment')).toHaveLength(5)
+    fireEvent.click(view.getByRole('button', { name: 'LinearLayout' }))
+    expect(setSelectedUiNodeId).toHaveBeenCalledWith('n1')
+    view.rerender(
+      <AndroidDebugWorkspace
+        controller={controller({
+          uiTree: snapshot,
+          selectedUiNodeId: 'n1',
+          setSelectedUiNodeId,
+        })}
+        devices={devices}
+        onDeviceChange={vi.fn()}
+      />,
+    )
+    expect(
+      view.container.querySelector('.android-tree-segment.is-selected')?.textContent,
+    ).toContain('LinearLayout')
+    expect(
+      view.container.querySelector('.android-ui-node-box rect')?.getAttribute('x'),
+    ).toBe('10')
+
+    fireEvent.change(view.getByLabelText('Search UI tree'), {
+      target: { value: 'LinearLayout' },
+    })
+    expect(
+      view.container.querySelectorAll('.android-tree-segment.is-search-match'),
+    ).toHaveLength(1)
+
+    fireEvent.change(view.getByLabelText('Search UI tree'), {
+      target: { value: '' },
+    })
+    fireEvent.click(
+      view.getByLabelText(
+        'Collapse FrameLayout / LinearLayout / FrameLayout / WebView',
+      ),
+    )
+    expect(view.queryByText('“Reserve”')).toBeNull()
+    fireEvent.click(
+      view.getByLabelText('Expand FrameLayout / LinearLayout / FrameLayout / WebView'),
+    )
+    expect(view.getByText('“Reserve”')).toBeTruthy()
+
+    fireEvent.click(view.getByLabelText('Compress chains'))
+    expect(view.getByText('· 5 rows')).toBeTruthy()
   })
 
   it('keeps unavailable and truncated states inside the inspector', () => {

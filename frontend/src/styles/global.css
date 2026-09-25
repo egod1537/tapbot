@@ -5459,6 +5459,14 @@ select:focus-visible {
   margin: 0 auto;
 }
 
+.vision-workspace-page.android-editor-page {
+  width: 100%;
+  max-width: none;
+  gap: 14px;
+  padding: 16px 12px 40px;
+  margin: 0;
+}
+
 .focused-section-heading {
   display: flex;
   min-height: 45px;
@@ -6245,9 +6253,9 @@ select:focus-visible {
 .android-debug-grid {
   display: grid;
   min-width: 0;
-  grid-template-columns: minmax(420px, 1fr) minmax(340px, 420px);
+  grid-template-columns: minmax(420px, 2fr) minmax(300px, 1fr) minmax(300px, 1fr);
   align-items: stretch;
-  gap: 12px;
+  gap: 8px;
 }
 
 .android-live-card.bp6-card,
@@ -6256,7 +6264,9 @@ select:focus-visible {
 .android-ui-tree-card.bp6-card,
 .android-event-card.bp6-card,
 .android-inspector-panel.bp6-card,
-.android-console-panel.bp6-card {
+.android-console-panel.bp6-card,
+.android-hierarchy-pane.bp6-card,
+.android-node-inspector-pane.bp6-card {
   min-width: 0;
   padding: 0;
   overflow: hidden;
@@ -6270,6 +6280,25 @@ select:focus-visible {
   min-width: 0;
   align-self: start;
   grid-template-rows: auto auto auto;
+}
+
+.android-hierarchy-pane.bp6-card,
+.android-node-inspector-pane.bp6-card {
+  min-width: 0;
+  min-height: 0;
+  height: auto;
+  padding: 0;
+  overflow: hidden;
+  contain: size layout;
+}
+
+.android-hierarchy-pane.bp6-card {
+  display: block;
+}
+
+.android-node-inspector-pane.bp6-card {
+  display: grid;
+  grid-template-rows: minmax(0, 1fr) auto;
 }
 
 .android-live-shell {
@@ -6554,6 +6583,7 @@ select:focus-visible {
 .android-node-inspector,
 .android-tab-inspector {
   display: grid;
+  height: 100%;
   min-width: 0;
   min-height: 0;
   overflow: hidden;
@@ -6643,6 +6673,7 @@ select:focus-visible {
   display: flex;
   min-height: 27px;
   align-items: center;
+  flex-wrap: wrap;
   gap: 12px;
   padding: 2px 9px 5px;
   border-bottom: 1px solid #2d333b;
@@ -6662,6 +6693,10 @@ select:focus-visible {
   margin: 0;
 }
 
+.android-tree-compression-toggle {
+  margin-left: auto;
+}
+
 .android-hierarchy-scroll,
 .android-node-inspector-scroll {
   min-height: 0;
@@ -6677,10 +6712,101 @@ select:focus-visible {
 .android-hierarchy-row {
   display: flex;
   height: 27px;
+  min-width: 0;
   align-items: center;
   border-radius: 2px;
   color: #cbd1d8;
   white-space: nowrap;
+}
+
+.android-tree-chain {
+  display: flex;
+  min-width: 0;
+  flex: 1;
+  align-items: center;
+  overflow: hidden;
+  white-space: nowrap;
+}
+
+.android-tree-chain-item {
+  display: inline-flex;
+  min-width: 0;
+  align-items: center;
+}
+
+.android-tree-chain-separator {
+  padding: 0 3px;
+  color: #596473;
+  font-size: 9px;
+}
+
+.android-tree-segment {
+  display: inline-flex;
+  min-width: 0;
+  max-width: 180px;
+  height: 22px;
+  align-items: center;
+  gap: 3px;
+  padding: 1px 3px;
+  overflow: hidden;
+  border: 1px solid transparent;
+  border-radius: 2px;
+  color: #cbd1d8;
+  background: transparent;
+  font-family: var(--mono);
+  font-size: 9px;
+  cursor: pointer;
+}
+
+.android-tree-segment:hover {
+  border-color: #4d5865;
+  color: #f1f4f7;
+  background: #303944;
+}
+
+.android-tree-segment.is-wrapper {
+  color: #7f8b98;
+}
+
+.android-tree-segment.is-actionable {
+  color: #d9eaff;
+  font-weight: 600;
+}
+
+.android-tree-segment.is-selected {
+  border-color: #72aee8;
+  color: #fff;
+  background: #28557e;
+}
+
+.android-tree-segment.is-search-match:not(.is-selected) {
+  border-color: #b48318;
+  color: #f8d675;
+  background: rgb(240 180 41 / 10%);
+}
+
+.android-tree-segment.is-muted {
+  opacity: 0.48;
+}
+
+.android-tree-segment-preview {
+  overflow: hidden;
+  color: #aeb7c2;
+  font-family: inherit;
+  font-weight: 400;
+  text-overflow: ellipsis;
+}
+
+.android-tree-child-count {
+  min-width: 18px;
+  margin: 0 4px;
+  padding: 1px 4px;
+  border-radius: 8px;
+  color: #91a0af;
+  background: #29313a;
+  font-family: var(--mono);
+  font-size: 8px;
+  text-align: center;
 }
 
 .android-hierarchy-row:hover {
@@ -6872,7 +6998,9 @@ select:focus-visible {
 }
 
 .android-console-panel.bp6-card {
+  display: grid;
   min-height: 0;
+  grid-template-rows: auto minmax(0, 1fr);
 }
 
 .android-console-panel .android-card-heading {
@@ -6881,6 +7009,27 @@ select:focus-visible {
 
 .android-console-panel .android-event-list {
   height: 180px;
+}
+
+.android-console-tabs {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.android-console-content {
+  height: 220px;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.android-console-content > .android-event-list,
+.android-console-content > .android-tab-inspector {
+  height: 100%;
+}
+
+.android-console-content .android-state-list {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
 }
 
 .android-debug-message-slot {
@@ -7158,13 +7307,15 @@ select:focus-visible {
   color: #fa999c;
 }
 
-@media (max-width: 1040px) {
+@media (max-width: 1199px) {
   .android-debug-grid {
     grid-template-columns: 1fr;
   }
 
-  .android-debug-side-panel {
-    height: min(820px, 80vh);
+  .android-hierarchy-pane.bp6-card,
+  .android-node-inspector-pane.bp6-card {
+    height: 680px;
+    contain: layout;
   }
 }
 
@@ -7217,8 +7368,9 @@ select:focus-visible {
     grid-template-columns: 1fr;
   }
 
-  .android-debug-side-panel {
-    height: 760px;
+  .android-hierarchy-pane.bp6-card,
+  .android-node-inspector-pane.bp6-card {
+    height: 600px;
   }
 
   .android-decision-debug {

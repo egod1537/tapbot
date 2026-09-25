@@ -51,7 +51,7 @@ export function DebugPage() {
   }
 
   return (
-    <div className="vision-workspace-page">
+    <div className="vision-workspace-page android-editor-page">
       <AndroidDebugWorkspace
         controller={controller}
         devices={deviceList.devices}
